@@ -79,7 +79,7 @@ class SHD(torch.utils.data.IterableDataset):
         max_time, in_miliseconds = 1.0, 1000
         step_size = self.bin_size / in_miliseconds
         self.time_bins = np.arange(0, max_time + step_size, step_size)
-        self.num_time_bins = len(self.time_bins)
+        self.num_time_bins = len(self.time_bins) - 1
 
     def __len__(self):
         return self.batches_per_epoch
@@ -88,6 +88,7 @@ class SHD(torch.utils.data.IterableDataset):
         if self.shuffle:
             self.rng.shuffle(self.sample_index)
 
+        raw_bins = len(self.time_bins)
         for counter in range(len(self)):
             batch_index = self.sample_index[
                 self.batch_size * counter : self.batch_size * (counter + 1)
@@ -95,7 +96,11 @@ class SHD(torch.utils.data.IterableDataset):
 
             coo = [[] for _ in range(3)]
             for batch_count, idx in enumerate(batch_index):
-                times = np.digitize(self.firing_times[idx], self.time_bins) - 1
+                times = np.clip(
+                    np.digitize(self.firing_times[idx], self.time_bins) - 1,
+                    0,
+                    raw_bins - 1,
+                )
                 units = self.units_fired[idx]
                 batch = [batch_count for _ in range(len(times))]
 
@@ -104,14 +109,14 @@ class SHD(torch.utils.data.IterableDataset):
                 coo[2].extend(units)
 
             # Create sparse matrix
-            i = torch.LongTensor(coo)
-            v = torch.FloatTensor(np.ones(len(coo[0])))
-            X_batch = torch.sparse.FloatTensor(
+            i = torch.tensor(coo, dtype=torch.long)
+            v = torch.ones(len(coo[0]), dtype=torch.float32)
+            X_batch = torch.sparse_coo_tensor(
                 i,
                 v,
-                torch.Size(
-                    [self.batch_size, self.num_time_bins, self.num_input_channel]
-                ),
+                size=(self.batch_size, raw_bins, self.num_input_channel),
+                dtype=torch.float32,
+                check_invariants=False,
             ).to_dense()
 
             X_batch = X_batch[:, :-1]  # correct for spikes outside interval
@@ -157,7 +162,7 @@ class SHDAdding(torch.utils.data.IterableDataset):
         max_time, in_miliseconds = 1.0, 1000
         step_size = self.bin_size / in_miliseconds
         self.time_bins = np.arange(0, max_time + step_size, step_size)
-        self.num_time_bins = 2 * len(self.time_bins)
+        self.num_time_bins = 2 * (len(self.time_bins) - 1)
 
     def __len__(self):
         return self.batches_per_epoch
@@ -166,6 +171,7 @@ class SHDAdding(torch.utils.data.IterableDataset):
         if not self.shuffle:
             self.rng = np.random.default_rng(self.seed)
 
+        raw_bins = len(self.time_bins)
         for i in range(self.batches_per_epoch):
             batch_index = self.rng.integers(
                 low=0, high=len(self.labels), size=2 * self.batch_size
@@ -173,7 +179,11 @@ class SHDAdding(torch.utils.data.IterableDataset):
 
             coo = [[] for _ in range(3)]
             for batch_count, idx in enumerate(batch_index):
-                times = np.digitize(self.firing_times[idx], self.time_bins) - 1
+                times = np.clip(
+                    np.digitize(self.firing_times[idx], self.time_bins) - 1,
+                    0,
+                    raw_bins - 1,
+                )
                 units = self.units_fired[idx]
                 batch = [batch_count for _ in range(len(times))]
 
@@ -181,18 +191,18 @@ class SHDAdding(torch.utils.data.IterableDataset):
                 coo[1].extend(times)
                 coo[2].extend(units)
 
-            i = torch.LongTensor(coo)
-            v = torch.FloatTensor(np.ones(len(coo[0])))
-            X_batch = torch.sparse.FloatTensor(
+            i = torch.tensor(coo, dtype=torch.long)
+            v = torch.ones(len(coo[0]), dtype=torch.float32)
+            X_batch = torch.sparse_coo_tensor(
                 i,
                 v,
-                torch.Size(
-                    [
-                        2 * self.batch_size,
-                        self.num_time_bins // 2,
-                        self.num_input_channel,
-                    ]
+                size=(
+                    2 * self.batch_size,
+                    raw_bins,
+                    self.num_input_channel,
                 ),
+                dtype=torch.float32,
+                check_invariants=False,
             ).to_dense()
 
             y_batch = self.labels[batch_index]

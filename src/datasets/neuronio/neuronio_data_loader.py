@@ -131,6 +131,7 @@ def worker_fn(
     neuronio_data_dim: int = NEURONIO_DATA_DIM,
     ignore_synapse_types: bool = False,
     verbose: bool = False,
+    worker_idx: int = 0,
 ):
     # set count for this worker process
     torch.set_num_threads(1)
@@ -140,7 +141,7 @@ def worker_fn(
     generate_batch_rng = np.random.default_rng(seed)
 
     # sleep so not all start loading at same time
-    time.sleep(seed * 3)
+    time.sleep(worker_idx * 3)
 
     # create synapse types
     synapse_types = torch.tensor(create_neuronio_input_type(), dtype=torch.float32)
@@ -269,6 +270,7 @@ class NeuronIO(IterableDataset):
                     self.neuronio_data_dim,
                     self.ignore_synapse_types,
                     self.verbose,
+                    i,
                 ),
             )
             worker.daemon = True

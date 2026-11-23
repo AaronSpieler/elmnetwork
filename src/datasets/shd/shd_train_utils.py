@@ -17,8 +17,8 @@ LAST_STEP_CLASS_TARGET = Integer[Array, "batch"]
 LAST_STEP_CLASS_PRED = Float[Array, "batch classes"]
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_jit(donate="all-except-first")
+@jaxtyped(typechecker=typechecker)
 def shd_loss(
     model: DynamicModel,  # NOTE: memory will NOT be donated
     x: LAST_STEP_CLASS_INPUT,
@@ -32,6 +32,7 @@ def shd_loss(
     return_carry: bool = False,
     label_smoothing: float = 0.0,
     regularizer: Optional[Regularizer] = None,
+    grad_checkpointing: bool = False,
 ) -> Tuple[Float[Array, ""], Tuple[Optional[LAST_STEP_CLASS_PRED], Optional[Any]]]:
     keys = jrandom.split(key, batch_size)
     logits, recording, carry = jax.vmap(
@@ -41,6 +42,7 @@ def shd_loss(
             key=key,
             monitor=regularizer.monitor if regularizer else None,
             inference=inference,
+            grad_checkpointing=grad_checkpointing,
         )
     )(x, init_carry, keys)
     logits = logits[:, -1, :]  # get last output
@@ -55,8 +57,8 @@ def shd_loss(
     return loss, (logits, carry)
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_value_and_grad(has_aux=True)
+@jaxtyped(typechecker=typechecker)
 def shd_loss_and_grads(
     model_diff: DynamicModel,
     model_stat: DynamicModel,
@@ -70,10 +72,8 @@ def shd_loss_and_grads(
     return_carry: bool = False,
     label_smoothing: float = 0.0,
     regularizer: Optional[Regularizer] = None,
-) -> Tuple[
-    Tuple[Float[Array, ""], Tuple[Optional[LAST_STEP_CLASS_PRED], Optional[Any]]],
-    Optional[DynamicModel],
-]:
+    grad_checkpointing: bool = False,
+) -> Tuple[Float[Array, ""], Tuple[Optional[LAST_STEP_CLASS_PRED], Optional[Any]]]:
     model = eqx.combine(model_diff, model_stat)
     return shd_loss(
         model,  # NOTE: memory will NOT not be donated
@@ -88,11 +88,12 @@ def shd_loss_and_grads(
         return_carry,
         label_smoothing,
         regularizer,
+        grad_checkpointing,
     )
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_jit(donate="all")
+@jaxtyped(typechecker=typechecker)
 def shd_make_step(
     model: DynamicModel,
     x: LAST_STEP_CLASS_INPUT,
@@ -109,6 +110,7 @@ def shd_make_step(
     return_carry: bool = False,
     label_smoothing: float = 0.0,
     regularizer: Optional[Regularizer] = None,
+    grad_checkpointing: bool = False,
 ) -> Tuple[
     Optional[Float[Array, ""]],
     Optional[LAST_STEP_CLASS_PRED],
@@ -131,6 +133,7 @@ def shd_make_step(
         return_carry,
         label_smoothing,
         regularizer,
+        grad_checkpointing,
     )
     updates, opt_state = gradient_transform.update(
         grads, opt_state, eqx.filter(model, train_params_filter)

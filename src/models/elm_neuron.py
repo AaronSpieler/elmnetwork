@@ -233,9 +233,9 @@ class ELM(eqx.Module, DynamicModel):
 
         # derived properties
         self.mlp_num_hidden_units = (
-            mlp_num_hidden_units if mlp_num_hidden_units else 2 * num_memory
+            mlp_num_hidden_units if mlp_num_hidden_units is not None else 2 * num_memory
         )
-        self.num_branch = num_branch if num_branch else num_input
+        self.num_branch = num_branch if num_branch is not None else num_input
         self.mlp_num_input = self.num_branch + num_memory
         self.num_synapse = num_synapse_per_branch * self.num_branch
 
@@ -252,6 +252,7 @@ class ELM(eqx.Module, DynamicModel):
             shape=(self.num_synapse,),
             minval=syn_min / syn_scale,
             maxval=syn_max / syn_scale,
+            dtype=self.dtype,
         )
 
         # initialization of mlp weights
@@ -539,14 +540,15 @@ class ELM(eqx.Module, DynamicModel):
         return x
 
     # all "apply" functions are potentially no-op
-    @jaxtyped(typechecker=typechecker)
     @eqx.filter_jit
+    @jaxtyped(typechecker=typechecker)
     def dynamics(
         self,
         carry: NeuronCarry,
-        x_t: Float[Array, "{self.num_synapse}"],
+        x_t: Float[Array, "_"],
         monitor: Optional[Monitor],
         inference: bool,
+        precomputed_branches: bool = False,
     ) -> tuple[NeuronCarry, NeuronRecord]:
         monitor = monitor if monitor else []
         prev_state, dynamic_key, const_key = carry
@@ -554,10 +556,14 @@ class ELM(eqx.Module, DynamicModel):
 
         # const key for variational dropout
         input_dropout_key, memory_dropout_key = jrandom.split(const_key, 2)
-        x_t = self.apply_input_dropout(x_t, inference, input_dropout_key)
 
-        # integrate synaptic input on branches
-        b_act = self.branch_integration(x_t, self.w_s)
+        # integrate synaptic input on branches (or take precomputed branch sums)
+        if precomputed_branches:
+            assert self.input_dropout == 0.0
+            b_act = x_t
+        else:
+            x_t = self.apply_input_dropout(x_t, inference, input_dropout_key)
+            b_act = self.branch_integration(x_t, self.w_s)
         b_act, next_state = self.apply_branch_decay(
             b_act, prev_state, next_state, self.kappa_b
         )
@@ -590,8 +596,8 @@ class ELM(eqx.Module, DynamicModel):
             recording["preact"] = pre_act
         return carry, recording
 
-    @jaxtyped(typechecker=typechecker)
     @eqx.filter_jit
+    @jaxtyped(typechecker=typechecker)
     def __call__(
         self,
         x: Input,
@@ -614,8 +620,8 @@ class ELM(eqx.Module, DynamicModel):
 
         return recording["output"], recording, carry
 
-    @jaxtyped(typechecker=typechecker)
     @eqx.filter_jit
+    @jaxtyped(typechecker=typechecker)
     def neuronio_eval_forward(
         self,
         x: Input,

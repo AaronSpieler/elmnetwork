@@ -1,3 +1,4 @@
+import copy
 import math
 from typing import Any
 
@@ -77,9 +78,13 @@ def calculate_model_cost_and_weight_stats(
     filtered_model = eqx.filter(model, train_params_filter)
     model_stats = {}
 
-    # compute cost statistics
+    # compute cost statistics (unfused view for fused models so XLA reports FLOPs)
+    cost_model = model
+    if getattr(model, "fused", False):
+        cost_model = copy.copy(model)
+        object.__setattr__(cost_model, "fused", False)
     one_step_data = jnp.ones(data_shape, dtype=data_dtype)
-    cost_fun = lambda key, x: model(
+    cost_fun = lambda key, x: cost_model(
         key=key,
         x=x,
     )

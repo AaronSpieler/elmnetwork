@@ -1,0 +1,22 @@
+input_embedding: 'one_hot'
+input_embedding_args:
+  scale: 3.0
+output_embedding: "linear_layer"
+layer_config:
+  input_wiring: "random_pooled"
+  input_wiring_args:
+    recurrent_connect: 0.8
+    share_size: 16
+  neuron_config:
+    input_scale: 10.0
+    num_branch: 50
+    num_synapse_per_branch: 15
+    num_memory: 15
+    memory_tau_min: 0.1
+    memory_tau_max: 100.0
+    high_pass_tau: 2.0
+last_layer_override:
+  # overrides layer_config
+  neuron_config:
+    num_memory: 3
+    mlp_num_hidden_layer: 0

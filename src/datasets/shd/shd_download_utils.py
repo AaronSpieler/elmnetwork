@@ -80,10 +80,12 @@ def validate_file(fpath, file_hash, algorithm="auto", chunk_size=65535):
 
 
 def _hash_file(fpath, algorithm="sha256", chunk_size=65535):
-    if (algorithm == "sha256") or (algorithm == "auto" and len(hash) == 64):
+    if algorithm == "sha256":
         hasher = hashlib.sha256()
-    else:
+    elif algorithm == "md5":
         hasher = hashlib.md5()
+    else:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
 
     with open(fpath, "rb") as fpath_file:
         for chunk in iter(lambda: fpath_file.read(chunk_size), b""):
@@ -114,7 +116,7 @@ def get_file(
     datadir = os.path.join(datadir_base, cache_subdir)
 
     # Create directories if they don't exist
-    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(datadir_base, exist_ok=True)
     os.makedirs(datadir, exist_ok=True)
 
     fpath = os.path.join(datadir, fname)
@@ -147,8 +149,9 @@ def get_file(
                 raise Exception(error_msg.format(origin, e.code, e.msg))
             except URLError as e:
                 raise Exception(error_msg.format(origin, e.errno, e.reason))
-        except (Exception, KeyboardInterrupt) as e:
+        except (Exception, KeyboardInterrupt):
             if os.path.exists(fpath):
                 os.remove(fpath)
+            raise
 
     return fpath

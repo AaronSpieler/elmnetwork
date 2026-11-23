@@ -15,8 +15,8 @@ NEURONIO_INPUT = Float[Array, "batch time channel"]
 NEURONIO_TARGET = Tuple[Integer[Array, "batch time"], Float[Array, "batch time"]]
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_jit
+@jaxtyped(typechecker=typechecker)
 def neuronio_loss(
     model: DynamicModel,
     x: NEURONIO_INPUT,
@@ -53,8 +53,8 @@ def neuronio_loss(
     return loss, carry
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_value_and_grad(has_aux=True)
+@jaxtyped(typechecker=typechecker)
 def neuronio_loss_and_grads(
     model_diff: DynamicModel,
     model_stat: DynamicModel,
@@ -65,15 +65,15 @@ def neuronio_loss_and_grads(
     burn_in_time: int,
     init_carry: Optional[Any] = None,
     return_carry: bool = False,
-) -> Tuple[Tuple[Optional[Float[Array, ""]], Optional[Any]], Optional[DynamicModel]]:
+) -> Tuple[Optional[Float[Array, ""]], Optional[Any]]:
     model = eqx.combine(model_diff, model_stat)
     return neuronio_loss(
         model, x, y, key, batch_size, burn_in_time, False, init_carry, return_carry
     )
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_jit
+@jaxtyped(typechecker=typechecker)
 def neuronio_make_step(
     model: DynamicModel,
     x: NEURONIO_INPUT,

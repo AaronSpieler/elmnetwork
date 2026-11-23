@@ -19,8 +19,8 @@ LANGUAGE_PRED = Float[Array, "batch time vocabsize"]
 
 # NOTE: adding label smoothing or reularization changes loss,
 #       therefore must be disabled for BPC calculation
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_jit(donate="all-except-first")
+@jaxtyped(typechecker=typechecker)
 def language_loss(
     model: DynamicModel,  # NOTE: memory will NOT be donated
     x: LANGUAGE_INPUT,
@@ -35,6 +35,7 @@ def language_loss(
     return_logits: bool = False,
     return_carry: bool = False,
     regularizer: Optional[Regularizer] = None,
+    grad_checkpointing: bool = False,
 ) -> Tuple[Optional[Float[Array, ""]], Tuple[Optional[LANGUAGE_PRED], Optional[Any]]]:
     # logits: batch, time, classes
     keys = jrandom.split(key, batch_size)
@@ -45,6 +46,7 @@ def language_loss(
             key=key,
             monitor=regularizer.monitor if regularizer else None,
             inference=inference,
+            grad_checkpointing=grad_checkpointing,
         )
     )(x, init_carry, keys)
     full_logits = logits
@@ -62,8 +64,8 @@ def language_loss(
     return loss, (logits, carry)
 
 
-@jaxtyped(typechecker=typechecker)
 @eqx.filter_value_and_grad(has_aux=True)
+@jaxtyped(typechecker=typechecker)
 def language_loss_and_grads(
     model_diff: DynamicModel,
     model_stat: DynamicModel,
@@ -78,10 +80,8 @@ def language_loss_and_grads(
     return_logits: bool = False,
     return_carry: bool = False,
     regularizer: Optional[Regularizer] = None,
-) -> Tuple[
-    Tuple[Optional[Float[Array, ""]], Tuple[Optional[LANGUAGE_PRED], Optional[Any]]],
-    Optional[DynamicModel],
-]:
+    grad_checkpointing: bool = False,
+) -> Tuple[Optional[Float[Array, ""]], Tuple[Optional[LANGUAGE_PRED], Optional[Any]]]:
     model = eqx.combine(model_diff, model_stat)
     return language_loss(
         model,  # NOTE: memory will NOT not be donated
@@ -97,6 +97,7 @@ def language_loss_and_grads(
         return_logits,
         return_carry,
         regularizer,
+        grad_checkpointing,
     )
 
 
@@ -118,6 +119,7 @@ def language_make_step(
     return_grad_norms: bool = False,
     return_carry: bool = False,
     regularizer: Optional[Regularizer] = None,
+    grad_checkpointing: bool = False,
 ) -> Tuple[
     Optional[Float[Array, ""]],
     Optional[LANGUAGE_PRED],
@@ -141,6 +143,7 @@ def language_make_step(
         return_logits,
         return_carry,
         regularizer,
+        grad_checkpointing,
     )
     updates, opt_state = gradient_transform.update(
         grads, opt_state, eqx.filter(model, train_params_filter)

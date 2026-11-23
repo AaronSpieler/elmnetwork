@@ -7,6 +7,12 @@ import time
 import traceback
 from pathlib import Path
 
+# configure JAX GPU memory preallocation before importing JAX
+_parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
+os.environ.setdefault(
+    "XLA_PYTHON_CLIENT_MEM_FRACTION", str(0.95 * (1 / _parallel_executions))
+)
+
 import equinox as eqx
 import hydra
 import jax
@@ -25,7 +31,6 @@ from src.datasets.language.language_viz_utils import (
     calculate_and_plot_spiking_stats,
     visualize_batch,
 )
-from src.models.elm_layer import ALL_MONITORS
 from src.models.elm_network import ELMNetwork
 from src.training.regularizer import ELMNetworkRegularizer
 from src.training.train_utils import (
@@ -99,11 +104,8 @@ def main(cfg: DictConfig):
     curr_actual_seed = cfg.setup.seed
     print(f"Current Actual Seed: {curr_actual_seed}")
 
-    # set memory prealloc jax
-    parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
-    curr_gpu_mem_fraction = 0.95 * (1 / parallel_executions)
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(curr_gpu_mem_fraction)
-    print(f"GPU Memory Fraction: {curr_gpu_mem_fraction}")
+    # report memory prealloc jax
+    print(f"GPU Memory Fraction: {os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION']}")
 
     # check backend working
     jax.config.update("jax_default_matmul_precision", cfg.setup.matmul_precision)
@@ -134,7 +136,8 @@ def main(cfg: DictConfig):
     vocab_size = len(corpus.vocab)
 
     # get data iterators
-    test_batch_size = 1
+    test_batch_size = int(cfg.training.get("test_batch_size", 1))
+    viz_batch_size = min(cfg.training.valid_batch_size, 8)
     viz_seq_length = 2000
     train_iterator = corpus.get_iterator(
         "train",
@@ -159,7 +162,7 @@ def main(cfg: DictConfig):
     )
     viz_iterator = corpus.get_iterator(
         "test",
-        cfg.training.valid_batch_size,
+        viz_batch_size,
         viz_seq_length,
         device="cpu",
         ext_len=0,
@@ -215,9 +218,9 @@ def main(cfg: DictConfig):
     with open(str(artifacts_dir / "model_stats.json"), "w") as f:
         json.dump(model_stats, f, indent=4)
     model_cost = {
-        "bytes accessed": model_stats["cost_analysis"]["bytes accessed"],
-        "flops": model_stats["cost_analysis"]["flops"],
-        "transcendentals": model_stats["cost_analysis"]["transcendentals"],
+        "bytes accessed": model_stats["cost_analysis"].get("bytes accessed", 0.0),
+        "flops": model_stats["cost_analysis"].get("flops", 0.0),
+        "transcendentals": model_stats["cost_analysis"].get("transcendentals", 0.0),
         "total_params": model_stats["total_params"],
         "total_trainable_params": model_stats["total_trainable_params"],
     }
@@ -234,14 +237,15 @@ def main(cfg: DictConfig):
     inputs = jnp.array(example_viz_batch[0].T, dtype=jnp.int32)
     targets = jnp.array(example_viz_batch[1].T, dtype=jnp.int32)
 
-    # get predictions and recordings
-    batch_viz_keys = jrandom.split(batch_viz_key, cfg.training.valid_batch_size)
+    # get predictions and recordings (only activity and preact are needed for viz)
+    viz_monitor = (["activity"], ["preact"])
+    batch_viz_keys = jrandom.split(batch_viz_key, viz_batch_size)
     logits, recordings, _ = jax.vmap(
         lambda x, key: model(
             x=x,
             init_carry=None,
             key=key,
-            monitor=ALL_MONITORS,
+            monitor=viz_monitor,
             inference=True,
         )
     )(inputs, batch_viz_keys)
@@ -269,6 +273,7 @@ def main(cfg: DictConfig):
     hidden_neuron_preacts = np.array(
         recordings[hidden_layer_idx][1]["preact"][batch_viz_idx, -last_num_steps:, :, 0]
     )
+    del logits, recordings
 
     try:
         activity_stats = calculate_and_plot_spiking_stats(
@@ -330,7 +335,10 @@ def main(cfg: DictConfig):
 
     # NOTE batch_size must be divisible by num_devices
     num_devices = len(jax.devices())
-    mesh = jax.make_mesh((num_devices,), ("batch",))
+    mesh_kwargs = (
+        {"axis_types": (jshard.AxisType.Auto,)} if hasattr(jshard, "AxisType") else {}
+    )
+    mesh = jax.make_mesh((num_devices,), ("batch",), **mesh_kwargs)
     data_sharding = jshard.NamedSharding(mesh, jshard.PartitionSpec("batch"))
     model_sharding = jshard.NamedSharding(mesh, jshard.PartitionSpec())
 
@@ -356,7 +364,8 @@ def main(cfg: DictConfig):
         train_eval_batches = (
             eval_iter.n_batch if train_eval_batches is None else train_eval_batches
         )
-        total_loss, total_len = 0.0, 0
+        # summed on device and read once at the end of eval
+        total_len, gpu_loss = 0, jnp.zeros(())
         if model_data_sharding is not None:
             model = eqx.filter_shard(model, model_data_sharding[0])
         pbar_eval = tqdm(
@@ -398,23 +407,21 @@ def main(cfg: DictConfig):
                 return_carry=hidden_state_reuse,
                 regularizer=None,  # eval
             )
-            loss = loss.item()
-
-            # exit training if loss is nan
-            if loss is None or jnp.isnan(loss):
-                print("Loss is nan: exiting evaluation!")
-                total_loss = np.nan
-                break
 
             total_len += curr_seq_len
-            total_loss += loss * curr_seq_len
+            gpu_loss = gpu_loss + loss * curr_seq_len
 
             # termination condition
             if curr_eval_batch >= train_eval_batches:
                 break
 
+        total_loss = float(gpu_loss)
+        if not math.isfinite(total_loss):
+            print("Loss is nan: exiting evaluation!")
+            total_loss = float("nan")
+
         # eval metric results
-        eval_loss = total_loss / total_len
+        eval_loss = total_loss / total_len if total_len > 0 else float("nan")
         eval_metric = "bpc"
         eval_value = eval_loss / math.log(2)
 
@@ -435,17 +442,30 @@ def main(cfg: DictConfig):
     train_turn = 0
     train_total_loss = 0.0
     train_total_len = 0
+    train_loss = float("nan")
+    train_metric = "bpc"
+    train_value = float("nan")
     train_start_time = time.time()
     best_valid_loss = float("inf")
     best_model_turn = 0
     carry = None
+    nan_failed = False
+
+    valid_every_turns = max(1, int(cfg.training.get("valid_every_turns", 1)))
+    grad_checkpointing = bool(cfg.training.get("grad_checkpointing", False))
+    turn_loss_sum, turn_len_sum = jnp.zeros(()), 0
+    state_dropout_rng = np.random.default_rng(curr_actual_seed)
 
     # termination by step, not by epoch
+    assert train_iterator.n_step > cfg.training.seq_length, (
+        f"Training corpus too short ({train_iterator.n_step}) for seq_length={cfg.training.seq_length}"
+    )
     while True:
         # ------- START OF TURN -------
 
-        # epoch tracking
+        # epoch tracking (reset hidden state across corpus wrap-around)
         train_epoch += 1
+        carry = None
 
         # configure pbar
         pbar = tqdm(
@@ -457,6 +477,12 @@ def main(cfg: DictConfig):
         for _, (inputs, targets, curr_seq_len) in pbar:
             # ------- START OF STEP -------
 
+            # skip trailing partial batch at epoch end (avoids recompilation and
+            # guarantees fast_backward windows divide the sequence length)
+            if curr_seq_len != cfg.training.seq_length:
+                carry = None
+                continue
+
             # step tracking
             train_step += 1
 
@@ -467,15 +493,14 @@ def main(cfg: DictConfig):
             # sharding data
             inputs, targets = eqx.filter_shard((inputs, targets), data_sharding)
 
-            # hidden state reuse
+            # hidden state reuse (CPU RNG avoids a per-step GPU sync)
             if cfg.training.hidden_state_reuse:
-                train_key, state_dropout_key = jrandom.split(train_key, 2)
                 hidden_dropout_prob = cosine_decay(
                     train_step,
                     cfg.training.hidden_state_warmup_steps,
                     cfg.training.hidden_state_dropout,
                 )
-                if jrandom.uniform(state_dropout_key).item() < hidden_dropout_prob:
+                if state_dropout_rng.random() < hidden_dropout_prob:
                     carry = None
             else:
                 hidden_dropout_prob = 1.0
@@ -500,30 +525,12 @@ def main(cfg: DictConfig):
                 return_grad_norms=False,
                 return_carry=cfg.training.hidden_state_reuse,
                 regularizer=regularizer,
+                grad_checkpointing=grad_checkpointing,
             )
 
-            # training went wrong
-            if loss is None or jnp.isnan(loss):
-                print("Loss is nan: exiting training.")
-                break
-            loss = loss.item()
-
-            # update train loss
-            train_total_len += curr_seq_len
-            train_total_loss += loss * curr_seq_len
-            train_loss = train_total_loss / max(1, train_total_len)
-            # NOTE: bpc is off with label smoothing or regularization
-            train_metric = "bpc"
-            train_value = train_loss / math.log(2)
-
-            # update progress bar
-            pbar.set_description(
-                (
-                    f"Train Step: {train_step}, "
-                    f"Train Loss: {train_loss:.5f}, "
-                    f"Train {train_metric}: {train_value:.5f}"
-                )
-            )
+            # accumulate loss on device (avoids per-step host sync)
+            turn_loss_sum = turn_loss_sum + loss * curr_seq_len
+            turn_len_sum += curr_seq_len
 
             # ------- VALIDATION -------
 
@@ -533,30 +540,54 @@ def main(cfg: DictConfig):
                 # turn tracking
                 train_turn += 1
 
-                # evaluate model
-                valid_loss, valid_metric, valid_value = evaluate_model(
-                    model,
-                    valid_key,
-                    valid_iterator,
-                    batch_size=cfg.training.valid_batch_size,
-                    vocab_size=vocab_size,
-                    train_eval_batches=cfg.training.train_eval_batches,
-                    hidden_state_reuse=cfg.training.hidden_state_reuse,
-                    model_data_sharding=(model_sharding, data_sharding),
-                    debug_log=cfg.setup.debug_run,
+                # flush turn's train loss from device once per turn
+                turn_loss = float(turn_loss_sum)
+                if not math.isfinite(turn_loss):
+                    print("Loss is nan: exiting training.")
+                    nan_failed = True
+                    break
+                train_total_loss += turn_loss
+                train_total_len += turn_len_sum
+                turn_loss_sum, turn_len_sum = jnp.zeros(()), 0
+                train_loss = train_total_loss / max(1, train_total_len)
+                # NOTE: bpc is off with label smoothing or regularization
+                train_value = train_loss / math.log(2)
+                pbar.set_description(
+                    f"Train Step: {train_step}, "
+                    f"Train Loss: {train_loss:.5f}, "
+                    f"Train {train_metric}: {train_value:.5f}"
                 )
 
-                # update best model
-                if (
-                    not (valid_loss is None or jnp.isnan(valid_loss))
-                    and valid_loss < best_valid_loss
-                ):
-                    best_valid_loss = valid_loss
-                    best_model_turn = train_turn
-                    best_model_state_dict = copy_model_to_cpu(model)
-                    eqx.tree_serialise_leaves(
-                        str(artifacts_dir / best_model_file_name), best_model_state_dict
+                # evaluate model
+                validate = (
+                    train_turn % valid_every_turns == 0
+                    or train_turn == cfg.training.num_turns
+                )
+                if validate:
+                    valid_loss, valid_metric, valid_value = evaluate_model(
+                        model,
+                        valid_key,
+                        valid_iterator,
+                        batch_size=cfg.training.valid_batch_size,
+                        vocab_size=vocab_size,
+                        train_eval_batches=cfg.training.train_eval_batches,
+                        hidden_state_reuse=cfg.training.hidden_state_reuse,
+                        model_data_sharding=(model_sharding, data_sharding),
+                        debug_log=cfg.setup.debug_run,
                     )
+
+                    # update best model
+                    if (
+                        not (valid_loss is None or math.isnan(valid_loss))
+                        and valid_loss < best_valid_loss
+                    ):
+                        best_valid_loss = valid_loss
+                        best_model_turn = train_turn
+                        best_model_state_dict = copy_model_to_cpu(model)
+                        eqx.tree_serialise_leaves(
+                            str(artifacts_dir / best_model_file_name),
+                            best_model_state_dict,
+                        )
 
                 # logging
                 train_time = time.time() - train_start_time
@@ -564,13 +595,19 @@ def main(cfg: DictConfig):
                     "train_turn": int(train_turn),
                     "train_time": float(train_time),
                     "train_loss": float(train_loss),
-                    "valid_loss": float(valid_loss),
-                    f"train_{train_metric}": float(train_value),
-                    f"valid_{valid_metric}": float(valid_value),
-                    "learning_rate": float(scheduler(train_step)),
-                    "hidden_dropout_prob": float(hidden_dropout_prob),
-                    "best_model_turn": int(best_model_turn),
                 }
+                if validate:
+                    train_log["valid_loss"] = float(valid_loss)
+                train_log[f"train_{train_metric}"] = float(train_value)
+                if validate:
+                    train_log[f"valid_{valid_metric}"] = float(valid_value)
+                train_log.update(
+                    {
+                        "learning_rate": float(scheduler(train_step)),
+                        "hidden_dropout_prob": float(hidden_dropout_prob),
+                        "best_model_turn": int(best_model_turn),
+                    }
+                )
                 print(json.dumps(train_log, separators=(",", ":")))
                 if cfg.setup.wandb_logging:
                     wandb.log({"train_log": train_log})
@@ -582,7 +619,7 @@ def main(cfg: DictConfig):
             # ------- END OF STEP -------
 
         # training went wrong
-        if loss is None or jnp.isnan(loss):
+        if nan_failed:
             break
 
         # training termination
@@ -623,13 +660,13 @@ def main(cfg: DictConfig):
     targets = jnp.array(example_viz_batch[1].T, dtype=jnp.int32)
 
     # get predictions
-    batch_viz_keys = jrandom.split(batch_viz_key, cfg.training.valid_batch_size)
+    batch_viz_keys = jrandom.split(batch_viz_key, viz_batch_size)
     logits, recordings, _ = jax.vmap(
         lambda x, key: model(
             x=x,
             init_carry=None,
             key=key,
-            monitor=ALL_MONITORS,
+            monitor=viz_monitor,
             inference=True,
         )
     )(inputs, batch_viz_keys)
@@ -657,6 +694,7 @@ def main(cfg: DictConfig):
     hidden_neuron_preacts = np.array(
         recordings[hidden_layer_idx][1]["preact"][batch_viz_idx, -last_num_steps:, :, 0]
     )
+    del logits, recordings
 
     try:
         activity_stats = calculate_and_plot_spiking_stats(
@@ -692,6 +730,11 @@ def main(cfg: DictConfig):
     )
 
     # Calculate test performance
+    test_sharding = (
+        (model_sharding, data_sharding)
+        if test_batch_size > 1 and test_batch_size % num_devices == 0
+        else None
+    )
     test_loss, test_metric, test_value = evaluate_model(
         model,
         test_test_key,
@@ -700,7 +743,7 @@ def main(cfg: DictConfig):
         vocab_size=vocab_size,
         train_eval_batches=(None if not cfg.setup.debug_run else 100),
         hidden_state_reuse=cfg.training.hidden_state_reuse,
-        model_data_sharding=None,  # test batch size 1 not shardable
+        model_data_sharding=test_sharding,
         debug_log=cfg.setup.debug_run,
     )
 

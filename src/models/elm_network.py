@@ -3,6 +3,7 @@ import warnings
 from typing import Any, Optional
 
 import equinox as eqx
+import jax
 import jax.lax as jlx
 import jax.nn as jnn
 import jax.random as jrandom
@@ -57,6 +58,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
     input_embedding_args: dict = eqx.field(static=True)
     output_embedding: Optional[str] = eqx.field(static=True)
     output_embedding_args: dict = eqx.field(static=True)
+    fused: bool = eqx.field(static=True)
 
     layers: list[ELMLayer]
     linear_embedding: Optional[eqx.nn.Linear]
@@ -74,6 +76,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
         layer_config: Optional[dict] = None,  # neuron_config becomes new default
         first_layer_override: Optional[dict] = None,  # ignored for num_layers = 1
         last_layer_override: Optional[dict] = None,
+        fused: bool = False,
         *,
         key: PRNGKeyArray,
     ):
@@ -114,6 +117,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
         self.output_embedding_args = (
             {} if output_embedding_args is None else output_embedding_args
         )
+        self.fused = fused
         _default_layer_config = (
             {} if layer_config is None else copy.deepcopy(layer_config)
         )
@@ -216,6 +220,10 @@ class ELMNetwork(eqx.Module, DynamicModel):
             warnings.warn("Readout ELM layer has high-pass filtered neuron outputs.")
         if self.layers[-1].input_wiring_args["recurrent_connect"] > 0.0:
             warnings.warn("Readout ELM layer has recurrent connections.")
+        if self.fused:
+            from .fused_sequence import check_fused_network_support
+
+            check_fused_network_support(self)
 
     def get_init_state(self) -> NetworkState:
         return [layer.get_init_state() for i, layer in enumerate(self.layers)]
@@ -247,6 +255,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
         x_t: Float[Array, "channel"],
         monitor: Optional[NetworkMonitor],
         inference: bool,
+        shared_lists: Optional[list] = None,
     ) -> tuple[NetworkCarry, NetworkRecord]:
         layer_ensemble_carries, key, const_key = carry
         next_layer_ensemble_carries = []
@@ -263,6 +272,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
                 x_t,
                 monitor,
                 inference,
+                shared_lists[layer_idx] if shared_lists is not None else None,
             )
             x_t = layer_ensemble_recording[0]["activity"]
             next_layer_ensemble_carries.append(layer_ensemble_carry)
@@ -278,6 +288,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
         monitor: Optional[NetworkMonitor] = None,
         inference: bool = False,
         init_carry: Optional[NetworkCarry] = None,
+        grad_checkpointing: bool = False,
         *,
         key: PRNGKeyArray,
     ) -> tuple[LayerActHistory, NetworkRecordHistory, NetworkCarry]:
@@ -285,9 +296,21 @@ class ELMNetwork(eqx.Module, DynamicModel):
         x = eqx.filter_vmap(lambda x_t: self.embed_input(x_t))(x)
 
         # network inference
-        scan_fun = lambda carry, x_t: self.dynamics(carry, x_t, monitor, inference)
         carry = init_carry if init_carry is not None else self.get_init_carry(key=key)
-        carry, recording = jlx.scan(scan_fun, carry, x)
+        if self.fused:
+            from .fused_sequence import fused_network_sequence
+
+            carry, recording = fused_network_sequence(
+                self, carry, x, monitor, inference
+            )
+        else:
+            shared_lists = [layer.shared_lists for layer in self.layers]
+            scan_fun = lambda carry, x_t: self.dynamics(
+                carry, x_t, monitor, inference, shared_lists
+            )
+            if grad_checkpointing:
+                scan_fun = jax.checkpoint(scan_fun)
+            carry, recording = jlx.scan(scan_fun, carry, x)
         output = recording[-1][0]["activity"]
 
         # output embedding

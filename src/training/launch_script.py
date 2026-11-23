@@ -47,6 +47,12 @@ def submit_job(cfg: DictConfig):
     exp_dir = Path(os.getcwd())
     slurm_dir = exp_dir / "slurm"
     src_dir = exp_dir / "src"
+    custom_code_folder = Path(
+        os.path.expandvars(os.path.expanduser(str(cfg.setup.custom_code_folder)))
+    )
+    conda_install_path = os.path.expandvars(
+        os.path.expanduser(str(cfg.setup.conda_install_path))
+    )
     experiment_name = HydraConfig.get().job.config_name
     curr_train_script_path = str(exp_dir / "curr_train_script.py")
     curr_experiment_config_path = str(exp_dir / "curr_experiment_config.yaml")
@@ -87,13 +93,13 @@ def submit_job(cfg: DictConfig):
         f"export CSTM_PRLL_EXEC=1",
         f"export PYTHONHASHSEED={cfg.setup.seed}",
         "echo 'Activating Conda Environment...'",
-        f"source {cfg.setup.conda_install_path}",
-        f"export PATH={src_dir}:$PATH",
-        f"conda activate {cfg.setup.conda_env_name}",
+        f"source '{conda_install_path}'",
+        f"export PYTHONPATH='{exp_dir}':${{PYTHONPATH:-}}",
+        f"conda activate '{cfg.setup.conda_env_name}'",
         "",
         "echo '---------- Launching Experiment ----------'",
         (
-            f"python {curr_train_script_path} "
+            f"python -u '{curr_train_script_path}' "
             f"hydra.run.dir='.' "
             f"hydra.job.chdir='true' "
             f"hydra.output_subdir='hydra_run' "
@@ -112,9 +118,7 @@ def submit_job(cfg: DictConfig):
 
     # copy train script
     shutil.copy(
-        str(
-            Path(cfg.setup.custom_code_folder) / "training" / cfg.training.train_script
-        ),
+        str(custom_code_folder / "training" / cfg.training.train_script),
         curr_train_script_path,
     )
 
@@ -130,7 +134,7 @@ def submit_job(cfg: DictConfig):
     # copy src directory
     ignore_dirs = ["__pycache__", ".ipynb_checkpoints", ".DS_Store"]
     shutil.copytree(
-        cfg.setup.custom_code_folder,
+        custom_code_folder,
         src_dir,
         ignore=shutil.ignore_patterns(*ignore_dirs),
     )

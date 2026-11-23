@@ -73,6 +73,8 @@ For running experiments on an Nvidia GPU cluster please use the CUDA version:
 conda env create -f elmnetwork_env_gpu.yml
 ```
 
+For CPU-only development use `elmnetwork_env.yml`.
+
 if solving is slow or the environment seems conflicted make sure to enable:
 
 ```
@@ -81,6 +83,39 @@ conda config --set channel_priority flexible
 ```
 
 For instructions on how to install miniconda please refer to: [installation guide](https://www.anaconda.com/docs/getting-started/miniconda/install/overview)
+
+## GPU Acceleration
+
+For larger ELM networks on Nvidia GPUs, two model options provide major speedups:
+
+***Branch pools (`input_wiring: "random_pooled"`):***
+
+- groups of `share_size` neurons share branch input connections (default `16`; `32`–`64` is faster on large layers)
+- pair with `training.grad_checkpointing=True` (see `configs/model/elmnet_enwik8_pooled.yaml`)
+
+***Fused Triton kernels (`fused: True`):***
+
+- runs the recurrent sequence in custom Triton GPU kernels (see `configs/model/elmnet_enwik8_fused.yaml`)
+- pair with `setup.matmul_precision: "BF16_BF16_F32"` on Ampere+ GPUs
+- optional per-layer `fused_kernels_args` (mainly `fast_backward`, `max_lanes`, `hidden_chunk`; see `src/models/fused_layer.py`)
+- note: the fused Triton kernel code was written fully LLM-assisted
+
+***Benchmarking on your GPU:***
+
+- use `src/profiling/bench_step.py` to time single training steps across modes (`--mode`)
+- benchmark kernel options via `--share-size`, `--fast-backward`, `--max-lanes`, `--hidden-chunk`
+
+```
+python src/profiling/bench_step.py --mode fused --num-hidden 4096 --num-memory 32 --batch 64 --steps 100
+```
+
+Per-step times on one NVIDIA A100-40GB (4096 neurons, 32 memory units, batch size 64, 100 steps):
+
+| Configuration | Step time | Speedup |
+|---|---:|---:|
+| Plain JAX, random wiring (TF32, checkpointed) | 12,103 ms | 1.0x |
+| + Branch pools (`share_size=64`) | 1,105 ms | 11.0x |
+| + Fused Triton kernels (`fast_backward=10`, `BF16_BF16_F32`) | 208 ms | 58.2x |
 
 ## Dataset Setup
 
@@ -143,10 +178,12 @@ More details can be found in the following repository: [neuron_as_deep_net](http
 If you wish to cite us you can do so using
 
 ```
-@article{spieler2026scaling,
+@inproceedings{spieler2026scaling,
   title={Scaling Laws and Tradeoffs in Recurrent Networks of Expressive Neurons},
   author={Spieler, Aaron and Martius, Georg and Levina, Anna},
-  journal={arXiv preprint arXiv:2605.12049},
-  year={2026}
+  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
+  volume={39},
+  year={2026},
+  url={https://openreview.net/forum?id=vE1e1mLJ0U}
 }
 ```

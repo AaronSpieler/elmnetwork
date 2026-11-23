@@ -1,9 +1,16 @@
 import gc
 import json
+import math
 import os
 import random
 import time
 from pathlib import Path
+
+# configure JAX GPU memory preallocation before importing JAX
+_parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
+os.environ.setdefault(
+    "XLA_PYTHON_CLIENT_MEM_FRACTION", str(0.95 * (1 / _parallel_executions))
+)
 
 import equinox as eqx
 import hydra
@@ -103,11 +110,8 @@ def main(cfg: DictConfig):
     curr_actual_seed = cfg.setup.seed
     print(f"Current Actual Seed: {curr_actual_seed}")
 
-    # set memory prealloc jax
-    parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
-    curr_gpu_mem_fraction = 0.95 * (1 / parallel_executions)
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(curr_gpu_mem_fraction)
-    print(f"GPU Memory Fraction: {curr_gpu_mem_fraction}")
+    # report memory prealloc jax
+    print(f"GPU Memory Fraction: {os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION']}")
 
     # check backend working
     jax.config.update("jax_default_matmul_precision", cfg.setup.matmul_precision)
@@ -268,9 +272,9 @@ def main(cfg: DictConfig):
     with open(str(artifacts_dir / "model_stats.json"), "w") as f:
         json.dump(model_stats, f, indent=4)
     model_cost = {
-        "bytes accessed": model_stats["cost_analysis"]["bytes accessed"],
-        "flops": model_stats["cost_analysis"]["flops"],
-        "transcendentals": model_stats["cost_analysis"]["transcendentals"],
+        "bytes accessed": model_stats["cost_analysis"].get("bytes accessed", 0.0),
+        "flops": model_stats["cost_analysis"].get("flops", 0.0),
+        "transcendentals": model_stats["cost_analysis"].get("transcendentals", 0.0),
         "total_params": model_stats["total_params"],
         "total_trainable_params": model_stats["total_trainable_params"],
     }
@@ -314,6 +318,7 @@ def main(cfg: DictConfig):
         target_soma=viz_y_soma,
         save_fig_path=str(artifacts_dir / "inner_workings"),
     )
+    del outputs, recordings
 
     ########## Scheduler and Optimizer##########
     print("---------- Scheduler and Optimizer configuration started: ----------")
@@ -360,15 +365,18 @@ def main(cfg: DictConfig):
     # set global variable
     train_step = 0
     train_total_loss = 0.0
+    train_loss = float("nan")
     valid_metric = float("inf") if cfg.training.select_rmse else 0.0
     train_start_time = time.time()
     best_model_epoch = 0
+    valid_every_epochs = max(1, int(cfg.training.get("valid_every_epochs", 1)))
 
     # deterministic validation
     valid_key, train_valid_eval_key, valid_valid_eval_key = jrandom.split(valid_key, 3)
 
     for train_epoch in range(1, cfg.training.num_epochs + 1):
         # ------- START OF EPOCH -------
+        epoch_loss_sum = jnp.zeros(())
         pbar = tqdm(
             enumerate(train_data_loader, 0),
             initial=train_step,
@@ -398,53 +406,55 @@ def main(cfg: DictConfig):
             )
             train_step += 1
 
-            # training went wrong
-            if loss is None or jnp.isnan(loss):
-                print("Loss is nan: exiting training.")
-                break
-
-            # update progress bar
-            train_total_loss += loss.item()
-            train_loss = train_total_loss / train_step
-            pbar.set_description(
-                (f"Train Epoch: {train_epoch}, " f"Train Loss: {train_loss:.5f}, ")
-            )
+            # accumulate loss on device (avoids per-step host sync)
+            epoch_loss_sum = epoch_loss_sum + loss
 
             # ------- END OF STEP -------
 
-        # training went wrong
-        if loss is None or jnp.isnan(loss):
+        # flush epoch loss from device once per epoch
+        epoch_loss = float(epoch_loss_sum)
+        if not math.isfinite(epoch_loss):
+            print("Loss is nan: exiting training.")
             break
+        train_total_loss += epoch_loss
+        train_loss = train_total_loss / max(1, train_step)
 
         # ------- VALIDAITON -------
 
-        # evaluate on training data
-        train_eval_metrics = train_evaluator.evaluate(model, train_valid_eval_key)
-        train_rmse = train_eval_metrics["soma_RMSE"]
-        train_auc = train_eval_metrics["AUC"]
+        validate = (
+            train_epoch % valid_every_epochs == 0
+            or train_epoch == cfg.training.num_epochs
+        )
+        if validate:
+            # evaluate on training data
+            train_eval_metrics = train_evaluator.evaluate(model, train_valid_eval_key)
+            train_rmse = train_eval_metrics["soma_RMSE"]
+            train_auc = train_eval_metrics["AUC"]
 
-        # evaluate on validation data
-        valid_eval_metrics = valid_evaluator.evaluate(model, valid_valid_eval_key)
-        valid_rmse = valid_eval_metrics["soma_RMSE"]
-        valid_auc = valid_eval_metrics["AUC"]
+            # evaluate on validation data
+            valid_eval_metrics = valid_evaluator.evaluate(model, valid_valid_eval_key)
+            valid_rmse = valid_eval_metrics["soma_RMSE"]
+            valid_auc = valid_eval_metrics["AUC"]
 
-        # check whether model has improved
-        if cfg.training.select_rmse:
-            if valid_rmse < valid_metric:
-                best_model_epoch = train_epoch
-                valid_metric = valid_rmse
-                best_model_state_dict = copy_model_to_cpu(model)
-                eqx.tree_serialise_leaves(
-                    str(artifacts_dir / best_model_file_name), best_model_state_dict
-                )
-        else:
-            if valid_auc > valid_metric:
-                best_model_epoch = train_epoch
-                valid_metric = valid_auc
-                best_model_state_dict = copy_model_to_cpu(model)
-                eqx.tree_serialise_leaves(
-                    str(artifacts_dir / best_model_file_name), best_model_state_dict
-                )
+            # check whether model has improved
+            if cfg.training.select_rmse:
+                if valid_rmse < valid_metric:
+                    best_model_epoch = train_epoch
+                    valid_metric = valid_rmse
+                    best_model_state_dict = copy_model_to_cpu(model)
+                    eqx.tree_serialise_leaves(
+                        str(artifacts_dir / best_model_file_name),
+                        best_model_state_dict,
+                    )
+            else:
+                if valid_auc > valid_metric:
+                    best_model_epoch = train_epoch
+                    valid_metric = valid_auc
+                    best_model_state_dict = copy_model_to_cpu(model)
+                    eqx.tree_serialise_leaves(
+                        str(artifacts_dir / best_model_file_name),
+                        best_model_state_dict,
+                    )
 
         # logging of epoch metrics
         train_time = time.time() - train_start_time
@@ -452,13 +462,22 @@ def main(cfg: DictConfig):
             "train_epoch": int(train_epoch),
             "train_time": float(train_time),
             "train_loss": float(train_loss),
-            "train_rmse": float(train_rmse),
-            "train_auc": float(train_auc),
-            "valid_rmse": float(valid_rmse),
-            "valid_auc": float(valid_auc),
-            "learning_rate": float(scheduler(train_step)),
-            "best_model_epoch": int(best_model_epoch),
         }
+        if validate:
+            train_log.update(
+                {
+                    "train_rmse": float(train_rmse),
+                    "train_auc": float(train_auc),
+                    "valid_rmse": float(valid_rmse),
+                    "valid_auc": float(valid_auc),
+                }
+            )
+        train_log.update(
+            {
+                "learning_rate": float(scheduler(train_step)),
+                "best_model_epoch": int(best_model_epoch),
+            }
+        )
         print(json.dumps(train_log, separators=(",", ":")))
         if cfg.setup.wandb_logging:
             wandb.log({"train_log": train_log})

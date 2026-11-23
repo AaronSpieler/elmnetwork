@@ -1,4 +1,4 @@
-train_script: "traning_script_neuronio.py"
+train_script: "training_script_neuronio.py"
 input_window_size: 500
 num_epochs: 35
 batches_per_epoch: 10000

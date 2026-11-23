@@ -1,8 +1,15 @@
 import json
+import math
 import os
 import random
 import time
 from pathlib import Path
+
+# configure JAX GPU memory preallocation before importing JAX
+_parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
+os.environ.setdefault(
+    "XLA_PYTHON_CLIENT_MEM_FRACTION", str(0.95 * (1 / _parallel_executions))
+)
 
 import equinox as eqx
 import h5py
@@ -20,7 +27,6 @@ from tqdm import tqdm
 from src.datasets.shd.shd_data_loader import SHD, SHDAdding, random_val_split_SHD_data
 from src.datasets.shd.shd_train_utils import shd_loss, shd_make_step
 from src.datasets.shd.shd_viz_utils import visualize_network_inference
-from src.models.elm_layer import ALL_MONITORS
 from src.models.elm_network import ELMNetwork
 from src.training.regularizer import ELMNetworkRegularizer
 from src.training.train_utils import (
@@ -93,11 +99,8 @@ def main(cfg: DictConfig):
     curr_actual_seed = cfg.setup.seed
     print(f"Current Actual Seed: {curr_actual_seed}")
 
-    # set memory prealloc jax
-    parallel_executions = int(os.environ.get("CSTM_PRLL_EXEC", "1"))
-    curr_gpu_mem_fraction = 0.95 * (1 / parallel_executions)
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(curr_gpu_mem_fraction)
-    print(f"GPU Memory Fraction: {curr_gpu_mem_fraction}")
+    # report memory prealloc jax
+    print(f"GPU Memory Fraction: {os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION']}")
 
     # check backend working
     jax.config.update("jax_default_matmul_precision", cfg.setup.matmul_precision)
@@ -139,6 +142,9 @@ def main(cfg: DictConfig):
     y_test = test_file["labels"]
 
     # initialize dataloaders
+    valid_batch_size = int(
+        cfg.training.get("valid_batch_size", cfg.training.batch_size)
+    )
     if not cfg.training.digit_addition:
         train_dataset = SHD(
             X=x_train,
@@ -147,11 +153,12 @@ def main(cfg: DictConfig):
             bin_size=cfg.training.bin_size,
             shuffle=True,
             test_set=False,
+            seed=curr_actual_seed,
         )
         valid_dataset = SHD(
             X=x_valid,
             y=y_valid,
-            batch_size=cfg.training.batch_size,
+            batch_size=valid_batch_size,
             bin_size=cfg.training.bin_size,
             shuffle=False,
             test_set=False,
@@ -179,11 +186,12 @@ def main(cfg: DictConfig):
             bin_size=cfg.training.bin_size,
             batches_per_epoch=batches_per_epoch,
             shuffle=True,
+            seed=curr_actual_seed,
         )
         valid_dataset = SHDAdding(
             X=x_valid,
             y=y_valid,
-            batch_size=cfg.training.batch_size,
+            batch_size=valid_batch_size,
             bin_size=cfg.training.bin_size,
             batches_per_epoch=valid_batches_per_epoch,
             shuffle=False,
@@ -243,9 +251,9 @@ def main(cfg: DictConfig):
     with open(str(artifacts_dir / "model_stats.json"), "w") as f:
         json.dump(model_stats, f, indent=4)
     model_cost = {
-        "bytes accessed": model_stats["cost_analysis"]["bytes accessed"],
-        "flops": model_stats["cost_analysis"]["flops"],
-        "transcendentals": model_stats["cost_analysis"]["transcendentals"],
+        "bytes accessed": model_stats["cost_analysis"].get("bytes accessed", 0.0),
+        "flops": model_stats["cost_analysis"].get("flops", 0.0),
+        "transcendentals": model_stats["cost_analysis"].get("transcendentals", 0.0),
         "total_params": model_stats["total_params"],
         "total_trainable_params": model_stats["total_trainable_params"],
     }
@@ -262,14 +270,15 @@ def main(cfg: DictConfig):
     inputs = jnp.array(example_viz_batch[0], dtype=jnp.bool)
     labels = jnp.array(example_viz_batch[1], dtype=jnp.int32)
 
-    # get predictions and recordings
+    # get predictions and recordings (only layer activity is needed for viz)
+    viz_monitor = (["activity"], [])
     batch_viz_keys = jrandom.split(batch_viz_key, cfg.training.eval_batch_size)
     logits, recordings, _ = jax.vmap(
         lambda x, key: model(
             x=x,
             init_carry=None,
             key=key,
-            monitor=ALL_MONITORS,
+            monitor=viz_monitor,
             inference=True,
         )
     )(inputs, batch_viz_keys)
@@ -286,6 +295,7 @@ def main(cfg: DictConfig):
         max_viz_samples=8,
         path=str(artifacts_dir / "data_and_pred_viz"),
     )
+    del logits, recordings
 
     ########## Scheduler and Optimizer##########
     print("---------- Scheduler and Optimizer configuration started: ----------")
@@ -332,7 +342,10 @@ def main(cfg: DictConfig):
     print("---------- Multi GPU sharding initialization: ----------")
 
     num_devices = len(jax.devices())
-    mesh = jax.make_mesh((num_devices,), ("batch",))
+    mesh_kwargs = (
+        {"axis_types": (jshard.AxisType.Auto,)} if hasattr(jshard, "AxisType") else {}
+    )
+    mesh = jax.make_mesh((num_devices,), ("batch",), **mesh_kwargs)
     data_sharding = jshard.NamedSharding(mesh, jshard.PartitionSpec("batch"))
     model_sharding = jshard.NamedSharding(mesh, jshard.PartitionSpec())
 
@@ -351,9 +364,9 @@ def main(cfg: DictConfig):
         model_data_sharding=None,
         debug_log: bool = False,
     ):
-        eval_loss = 0.0
-        correct_predictions = 0
         total_predictions = 0
+        gpu_loss = jnp.zeros(())
+        gpu_correct = jnp.zeros((), jnp.int32)
         if model_data_sharding is not None:
             model = eqx.filter_shard(model, model_data_sharding[0])
         for _, data in tqdm(
@@ -387,15 +400,16 @@ def main(cfg: DictConfig):
                 label_smoothing=0.0,  # eval
                 regularizer=None,  # eval
             )
-            eval_loss += loss.item()
+            gpu_loss = gpu_loss + loss
 
-            # Calculate accuracy
+            # Calculate accuracy on device
             predicted = jnp.argmax(logits, 1)
-            correct_predictions += jnp.sum(predicted == labels)
+            gpu_correct = gpu_correct + jnp.sum(predicted == labels, dtype=jnp.int32)
             total_predictions += labels.shape[0]
 
-        eval_loss = eval_loss / len(eval_iter)
-        eval_accuracy = correct_predictions / total_predictions
+        total_loss, correct_predictions = jax.device_get((gpu_loss, gpu_correct))
+        eval_loss = float(total_loss) / len(eval_iter)
+        eval_accuracy = int(correct_predictions) / total_predictions
 
         return eval_loss, eval_accuracy
 
@@ -410,19 +424,25 @@ def main(cfg: DictConfig):
 
     # set global variable
     train_step = 0
+    train_loss = float("nan")
     train_start_time = time.time()
     best_valid_accuracy = 0.0
     best_model_epoch = 0
+    best_model_train_loss = float("nan")
     best_model_train_accuracy = 0.0
     valid_accuracy = 0.0
+
+    valid_every_epochs = max(1, int(cfg.training.get("valid_every_epochs", 1)))
+    grad_checkpointing = bool(cfg.training.get("grad_checkpointing", False))
 
     # termination by step, not by epoch
     for train_epoch in range(1, cfg.training.num_epochs + 1):
         # ------- START OF EPOCH -------
 
-        # running statistics
-        train_total_loss = 0.0
-        train_correct_predictions = 0
+        # running statistics on device (avoids per-step host sync)
+        epoch_loss_sum = jnp.zeros(())
+        epoch_step_count = 0
+        train_correct_predictions = jnp.zeros((), jnp.int32)
         train_total_predictions = 0
 
         # configure pbar
@@ -433,6 +453,8 @@ def main(cfg: DictConfig):
             disable=not cfg.setup.debug_run,
         )
         for epoch_step, (inputs, labels) in pbar:
+            if epoch_step >= batches_per_epoch:
+                break
             # ------- START OF STEP -------
 
             # step tracking
@@ -463,64 +485,61 @@ def main(cfg: DictConfig):
                 return_carry=False,
                 label_smoothing=cfg.training.label_smoothing,
                 regularizer=regularizer,
+                grad_checkpointing=grad_checkpointing,
             )
 
-            # training went wrong
-            if loss is None or jnp.isnan(loss):
-                print("Loss is nan: exiting training.")
-                break
-            loss = loss.item()
-
-            # update train loss
-            train_total_loss += loss
-            train_loss = train_total_loss / (epoch_step + 1)
-
-            # update train accuracy
+            # accumulate loss and accuracy on device (no host sync per step)
+            epoch_loss_sum = epoch_loss_sum + loss
+            epoch_step_count += 1
             predicted = jnp.argmax(logits, 1)
-            train_correct_predictions += jnp.sum(predicted == labels)
-            train_total_predictions += labels.shape[0]
-            train_accuracy = train_correct_predictions / train_total_predictions
-
-            # update progress bar
-            pbar.set_description(
-                (
-                    f"Train Step: {train_step}, "
-                    f"Train Loss: {train_loss:.5f}, "
-                    f"Train Acc: {train_accuracy:.5f}"
-                )
+            train_correct_predictions = train_correct_predictions + jnp.sum(
+                predicted == labels, dtype=jnp.int32
             )
+            train_total_predictions += labels.shape[0]
 
             # ------- END OF STEP -------
 
-        # training went wrong
-        if loss is None or jnp.isnan(loss):
+        # flush epoch metrics from device once per epoch
+        loss_sum, correct_sum = jax.device_get(
+            (epoch_loss_sum, train_correct_predictions)
+        )
+        if not math.isfinite(float(loss_sum)):
+            print("Loss is nan: exiting training.")
             break
+        train_loss = float(loss_sum) / max(1, epoch_step_count)
+        train_accuracy = int(correct_sum) / max(1, train_total_predictions)
 
         # ------- VALIDATION -------
 
-        # evaluate model
-        valid_loss, valid_accuracy = evaluate_model(
-            model,
-            valid_key,
-            valid_dataset,
-            cfg.training.batch_size,
-            data_num_classes,
-            model_data_sharding=(model_sharding, data_sharding),
-            debug_log=cfg.setup.debug_run,
+        validate = (
+            train_epoch % valid_every_epochs == 0
+            or train_epoch == cfg.training.num_epochs
         )
-
-        # update best model
-        if (
-            not (valid_accuracy is None or jnp.isnan(valid_accuracy))
-            and valid_accuracy > best_valid_accuracy
-        ):
-            best_valid_accuracy = valid_accuracy
-            best_model_train_accuracy = train_accuracy
-            best_model_epoch = train_epoch
-            best_model_state_dict = copy_model_to_cpu(model)
-            eqx.tree_serialise_leaves(
-                str(artifacts_dir / best_model_file_name), best_model_state_dict
+        if validate:
+            # evaluate model
+            valid_loss, valid_accuracy = evaluate_model(
+                model,
+                valid_key,
+                valid_dataset,
+                valid_batch_size,
+                data_num_classes,
+                model_data_sharding=(model_sharding, data_sharding),
+                debug_log=cfg.setup.debug_run,
             )
+
+            # update best model
+            if (
+                not (valid_accuracy is None or math.isnan(valid_accuracy))
+                and valid_accuracy > best_valid_accuracy
+            ):
+                best_valid_accuracy = valid_accuracy
+                best_model_train_loss = train_loss
+                best_model_train_accuracy = train_accuracy
+                best_model_epoch = train_epoch
+                best_model_state_dict = copy_model_to_cpu(model)
+                eqx.tree_serialise_leaves(
+                    str(artifacts_dir / best_model_file_name), best_model_state_dict
+                )
 
         # logging
         train_time = time.time() - train_start_time
@@ -528,12 +547,18 @@ def main(cfg: DictConfig):
             "train_epoch": int(train_epoch),
             "train_time": float(train_time),
             "train_loss": float(train_loss),
-            "valid_loss": float(valid_loss),
-            f"train_accuracy": float(train_accuracy),
-            f"valid_accuracy": float(valid_accuracy),
-            "learning_rate": float(scheduler(train_step)),
-            "best_model_epoch": int(best_model_epoch),
         }
+        if validate:
+            train_log["valid_loss"] = float(valid_loss)
+        train_log["train_accuracy"] = float(train_accuracy)
+        if validate:
+            train_log["valid_accuracy"] = float(valid_accuracy)
+        train_log.update(
+            {
+                "learning_rate": float(scheduler(train_step)),
+                "best_model_epoch": int(best_model_epoch),
+            }
+        )
         print(json.dumps(train_log, separators=(",", ":")))
         if cfg.setup.wandb_logging:
             wandb.log({"train_log": train_log})
@@ -574,7 +599,7 @@ def main(cfg: DictConfig):
             x=x,
             init_carry=None,
             key=key,
-            monitor=ALL_MONITORS,
+            monitor=viz_monitor,
             inference=True,
         )
     )(inputs, batch_viz_keys)
@@ -591,6 +616,7 @@ def main(cfg: DictConfig):
         max_viz_samples=8,
         path=str(artifacts_dir / "data_and_pred_viz_after"),
     )
+    del logits, recordings
 
     ########## Quantitative Evaluation ##########
     print("---------- Quantitative evaluation started: ----------")
@@ -603,7 +629,7 @@ def main(cfg: DictConfig):
         model,
         valid_test_key,
         valid_dataset,
-        cfg.training.batch_size,
+        valid_batch_size,
         data_num_classes,
         model_data_sharding=(model_sharding, data_sharding),
         debug_log=cfg.setup.debug_run,
@@ -622,7 +648,9 @@ def main(cfg: DictConfig):
 
     # Logging evaluation metrics
     eval_results = {
-        "final_train_loss": float(train_loss),
+        "final_train_loss": float(
+            best_model_train_loss if best_model_epoch > 0 else train_loss
+        ),
         "final_valid_loss": float(valid_loss),
         "final_test_loss": float(test_loss),
         f"final_train_accuracy": float(best_model_train_accuracy),

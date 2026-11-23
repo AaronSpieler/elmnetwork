@@ -11,8 +11,15 @@ from jaxtyping import Array, Float, Integer, PRNGKeyArray, Shaped, jaxtyped
 from typeguard import typechecked as typechecker
 
 from .abstract_model import DynamicModel
-from .elm_modeling_utils import random_connect
-from .elm_neuron import ELM, NEURON_MONITORS, Input, Monitor, NeuronCarry, NeuronRecord
+from .elm_modeling_utils import random_connect, random_connect_pooled
+from .elm_neuron import (
+    ELM,
+    NEURON_MONITORS,
+    Input,
+    Monitor,
+    NeuronCarry,
+    NeuronRecord,
+)
 
 # below properties are vectorized neuron properties
 EnsembleState = dict[str, Float[Array, "neuron ..."]]
@@ -50,6 +57,7 @@ LAYER_MONITORS = [
 ALL_MONITORS = (LAYER_MONITORS, NEURON_MONITORS)
 INPUT_WIRINGS = [
     "random",
+    "random_pooled",
 ]
 
 
@@ -75,12 +83,14 @@ class ELMLayer(eqx.Module, DynamicModel):
     # general setup:
     input_dropout: float = eqx.field(static=True)
     recurrent_dropout: float = eqx.field(static=True)
+    fused_kernels_args: tuple = eqx.field(static=True)
 
     # learnable:
     ensemble: ELM
 
     # not learnable:
     input_connectome: Integer[Array, "neuron synapse"]
+    input_pool_order: Optional[Integer[Array, "branch neuron"]]
 
     def __init__(
         self,
@@ -91,6 +101,7 @@ class ELMLayer(eqx.Module, DynamicModel):
         input_wiring_args: Optional[dict] = None,
         input_dropout: float = 0.0,
         recurrent_dropout: float = 0.0,
+        fused_kernels_args: Optional[dict] = None,
         *,
         key: PRNGKeyArray,
     ):
@@ -102,11 +113,15 @@ class ELMLayer(eqx.Module, DynamicModel):
             and output size is auto-configured, and no custom synapse routing is allowed.
         - `input_wiring`: Which strategy to use for connecting inputs to neuron synapses.
             The default is `random` which uniformly at random samples possible connections.
+            `random_pooled` samples alike, but groups of `share_size` neurons share each
+            branch's input sources (branch pools; see `random_connect_pooled`).
         - `input_wiring_args`: The arguments to the connectivity generating function.
             For the `random` wiring connectivity one can specify the probability of
             sampling a recurrent connection (instead of a feed-forward connection).
         - `input_dropout`: The dropout probability for the feed-forward input during training.
         - `recurrent_dropout`: The dropout probability for the recurrent input during training.
+        - `fused_kernels_args`: Optional settings for the fused Triton kernels when the
+            network runs with `fused=True` (see `fused_layer.FUSED_SETTINGS`).
         """
         super().__init__()
 
@@ -116,6 +131,7 @@ class ELMLayer(eqx.Module, DynamicModel):
         self.input_wiring_args = {} if input_wiring_args is None else input_wiring_args
         self.input_dropout = input_dropout
         self.recurrent_dropout = recurrent_dropout
+        self.fused_kernels_args = tuple(sorted((fused_kernels_args or {}).items()))
 
         input_connectome_key, _, ensemble_key, key = jrandom.split(key, 4)
 
@@ -160,12 +176,23 @@ class ELMLayer(eqx.Module, DynamicModel):
         )
 
         # construct the input connectome matrix
+        self.input_pool_order = None
         if self.input_wiring == "random":
             self.input_connectome = random_connect(
                 key=input_connectome_key,
                 num_input=self.num_input,
                 num_neuron=self.num_neuron,
                 num_neuron_inputs=neuron_config["num_input"],
+                **self.input_wiring_args,
+            )
+        elif self.input_wiring == "random_pooled":
+            self.input_connectome, self.input_pool_order = random_connect_pooled(
+                key=input_connectome_key,
+                num_input=self.num_input,
+                num_neuron=self.num_neuron,
+                num_branch_neuron=neuron_config["num_branch"],
+                num_synapse_per_branch_neuron=neuron_config["num_synapse_per_branch"],
+                return_order=True,
                 **self.input_wiring_args,
             )
         else:
@@ -192,6 +219,14 @@ class ELMLayer(eqx.Module, DynamicModel):
         keys = jrandom.split(key, self.num_neuron)
         return eqx.filter_vmap(lambda key: ELM(**neuron_config, num_output=1, key=key))(
             keys
+        )
+
+    @property
+    def use_shared_lists(self) -> bool:
+        return (
+            self.input_wiring == "random_pooled"
+            and self.input_pool_order is not None
+            and self.ensemble.input_dropout == 0.0
         )
 
     @jaxtyped(typechecker=typechecker)
@@ -229,20 +264,24 @@ class ELMLayer(eqx.Module, DynamicModel):
         ensemble_init_carry = self.get_ensemble_init_carry(ensemble_key)
         return layer_init_carry, ensemble_init_carry
 
-    @eqx.filter_vmap(in_axes=dict(self=None, monitor=None))
+    @eqx.filter_vmap(
+        in_axes=dict(self=None, monitor=None, precomputed_branches=None)
+    )
     def ensemble_dynamics(
         self,
         neuron: ELM,  # vectorized
         carry: NeuronCarry,  # vectorized
-        x_t: Float[Array, "synapse"],  # vectorized
+        x_t: Float[Array, "_"],  # vectorized
         monitor: list[str],  # broadcasted
         inference: bool,  # broadcasted
+        precomputed_branches: bool = False,  # broadcasted
     ) -> tuple[NeuronCarry, NeuronRecord]:
         return neuron.dynamics(
             carry=carry,
             x_t=x_t,
             monitor=monitor,
             inference=inference,
+            precomputed_branches=precomputed_branches,
         )
 
     @jaxtyped(typechecker=typechecker)
@@ -273,14 +312,60 @@ class ELMLayer(eqx.Module, DynamicModel):
         ensemble_inputs = jnp.take(all_inputs, indices=self.input_connectome, axis=-1)
         return ensemble_inputs
 
+    @property
     @jaxtyped(typechecker=typechecker)
+    def shared_lists(self) -> Optional[dict[str, Shaped[Array, "..."]]]:
+        """Branch pools as shared lists, built once per sequence before scan."""
+        if not self.use_shared_lists:
+            return None
+        n, nb = self.num_neuron, self.ensemble.num_branch
+        p = self.ensemble.num_synapse_per_branch
+        g = self.input_wiring_args.get("share_size", 16)
+        runs = -(-n // g)  # the last list has fewer members unless n divides
+        order = jnp.pad(
+            self.input_pool_order, ((0, 0), (0, runs * g - n)), constant_values=-1
+        )
+        members = order.reshape(nb, runs, g)  # (branch, list, member), -1: no member
+        real = members >= 0
+        members = jnp.where(real, members, 0)
+        branch = jnp.arange(nb)
+        list_src = self.input_connectome.reshape(n, nb, p)[
+            members[..., 0], branch[:, None]
+        ]
+        w_s = eqx.filter_vmap(lambda neuron: neuron.w_s)(self.ensemble)
+        list_w = w_s.reshape(n, nb, p)[members, branch[:, None, None]]
+        list_w = jnp.where(real[..., None], list_w, 0.0) * self.ensemble.input_scale
+        return {
+            "list_src": list_src,
+            "list_w": list_w,
+            "list_pos": jnp.argsort(self.input_pool_order, axis=1),
+        }
+
+    @jaxtyped(typechecker=typechecker)
+    def sum_shared_lists(
+        self,
+        layer_inputs: Float[Array, "channel"],
+        prev_activity: Float[Array, "{self.num_neuron}"],
+        shared_lists: Optional[dict[str, Shaped[Array, "..."]]] = None,
+    ) -> Float[Array, "{self.num_neuron} branch"]:
+        tables = shared_lists if shared_lists is not None else self.shared_lists
+        all_inputs = jnp.concatenate((layer_inputs, prev_activity), axis=-1)
+        xs = all_inputs[tables["list_src"]]
+        sums = jnp.einsum("krgp,krp->krg", tables["list_w"], xs)
+        sums = jnp.take_along_axis(
+            sums.reshape(sums.shape[0], -1), tables["list_pos"], axis=1
+        )
+        return sums.T
+
     @eqx.filter_jit
+    @jaxtyped(typechecker=typechecker)
     def dynamics(
         self,
         carry: LayerEnsembleCarry,
         x_t: Float[Array, "channel"],
         monitor: Optional[LayerMonitor],
         inference: bool,
+        shared_lists: Optional[dict[str, Shaped[Array, "..."]]] = None,
     ) -> tuple[LayerEnsembleCarry, LayerEnsembleRecord]:
         layer_carry, ensemble_carry = carry
         layer_monitor, ensemble_monitor = monitor if monitor else ([], [])
@@ -297,13 +382,19 @@ class ELMLayer(eqx.Module, DynamicModel):
         )
 
         # simulate the ensemble for one time step
-        ensemble_inputs = self.gather_ensemble_inputs(x_t, a_t_dropped)
+        if self.use_shared_lists:
+            ensemble_inputs = self.sum_shared_lists(x_t, a_t_dropped, shared_lists)
+            precomputed_branches = True
+        else:
+            ensemble_inputs = self.gather_ensemble_inputs(x_t, a_t_dropped)
+            precomputed_branches = False
         ensemble_carry, ensemble_recording = self.ensemble_dynamics(
             self.ensemble,
             ensemble_carry,
             ensemble_inputs,
             ensemble_monitor,
             inference,
+            precomputed_branches,
         )
         next_state["a_t"] = jnp.squeeze(ensemble_recording["output"], axis=-1)
 
@@ -316,8 +407,8 @@ class ELMLayer(eqx.Module, DynamicModel):
         recordings = layer_recording, ensemble_recording
         return carry, recordings
 
-    @jaxtyped(typechecker=typechecker)
     @eqx.filter_jit
+    @jaxtyped(typechecker=typechecker)
     def __call__(
         self,
         x: Input,
@@ -329,11 +420,13 @@ class ELMLayer(eqx.Module, DynamicModel):
     ) -> tuple[LayerActHistory, LayerEnsembleRecordHistory, LayerEnsembleCarry]:
         # compute the recurrent dynamics for a single sample
         x = x.astype(self.ensemble.dtype)
+        shared_lists = self.shared_lists
         scan_fun = lambda carry_state, input_spikes: self.dynamics(
             carry_state,
             input_spikes,
             monitor,
             inference,
+            shared_lists,
         )
         carry = init_carry if init_carry is not None else self.get_init_carry(key=key)
         carry, records = jlx.scan(scan_fun, carry, x)
@@ -346,11 +439,13 @@ class ELMLayer(eqx.Module, DynamicModel):
             lambda tree: (
                 tree.ensemble,
                 tree.input_connectome,
+                tree.input_pool_order,
             ),
             elm_layer_filter,
             replace=(
                 # below works because neuron and ensemble share pytree structure
                 self.ensemble.get_train_params_filter(),
+                False,
                 False,
             ),
             is_leaf=lambda x: x is None,

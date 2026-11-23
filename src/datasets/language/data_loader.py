@@ -41,8 +41,8 @@ class LMOrderedIterator(object):
         # Evenly divide the data across the bsz batches.
         self.data = data.view(bsz, -1).t().contiguous().to(device)
 
-        # Number of mini-batches
-        self.n_batch = (self.n_step + self.bptt - 1) // self.bptt
+        # Number of mini-batches (matches get_fixlen_iter over range(0, n_step - 1, bptt))
+        self.n_batch = max(0, (self.n_step - 1 + self.bptt - 1) // self.bptt)
 
     def get_batch(self, i, bptt=None):
         if bptt is None:
@@ -281,7 +281,7 @@ def get_lm_corpus(datadir, dataset):
     fn = os.path.join(datadir, "cache.pt")
     if os.path.exists(fn):
         print("Loading cached dataset...")
-        corpus = torch.load(fn)
+        corpus = torch.load(fn, weights_only=False)
     else:
         print("Producing dataset {}...".format(dataset))
         kwargs = {}

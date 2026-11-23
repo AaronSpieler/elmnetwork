@@ -1,0 +1,31 @@
+# Copyright 2026 The jax_triton Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Library for JAX-Triton integrations."""
+
+from .triton_lib import CUSTOM_CALL_TARGET_NAME
+from .triton_lib import strides_from_shape
+from .triton_lib import TensorDescriptor
+from .triton_lib import triton_call
+from .version import __version__
+from .version import __version_info__
+
+__all__ = [
+    "triton_call",
+    "strides_from_shape",
+    "CUSTOM_CALL_TARGET_NAME",
+    "TensorDescriptor",
+    "__version__",
+    "__version_info__",
+]
