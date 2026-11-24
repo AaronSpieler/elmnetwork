@@ -26,24 +26,29 @@
           padding: 1.15rem 1.35rem; margin-bottom: 1.1rem; }
   .label { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
            color: var(--muted); }
-  .row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+  .row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; max-width: 100%; }
   .spread { justify-content: space-between; }
-  button, select { font: inherit; font-size: 0.9rem; color: var(--text); background: var(--card);
-                   border: 1px solid var(--line); border-radius: 8px; padding: 0.42rem 0.85rem; cursor: pointer; }
+  button, select { font: inherit; font-size: 0.9rem; line-height: 1.25; color: var(--text); background: var(--card);
+                   border: 1px solid var(--line); border-radius: 8px; padding: 0.45rem 0.85rem; cursor: pointer; }
+  select { appearance: none; -webkit-appearance: none; max-width: 100%; min-width: 0;
+           padding-right: 2.1rem; text-overflow: ellipsis;
+           background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23888' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5'/%3E%3C/svg%3E");
+           background-repeat: no-repeat; background-position: right 0.7rem center; background-size: 12px 12px; }
   button:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--muted); }
   button:disabled, select:disabled { opacity: 0.4; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
-                   padding: 0.48rem 1.4rem; }
+                   padding: 0.45rem 1.4rem; }
   .empty { margin-top: 1rem; border: 2px dashed var(--line); border-radius: 12px; padding: 1.6rem;
            text-align: center; color: var(--muted); }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.7rem;
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 0.7rem;
            margin-top: 1rem; }
-  .stat { background: var(--bg); border-radius: 10px; padding: 0.7rem 0.85rem; }
+  .stat { background: var(--bg); border-radius: 10px; padding: 0.7rem 0.85rem; min-width: 0; }
   .stat-label { font-size: 0.78rem; color: var(--muted); }
   .stat-value { font-size: 1.45rem; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
   .stat-note { font-size: 0.75rem; color: var(--muted); white-space: nowrap; overflow: hidden;
                text-overflow: ellipsis; }
-  .status { margin-top: 0.9rem; font-size: 0.9rem; color: var(--muted); }
+  .status { margin-top: 0.9rem; font-size: 0.9rem; color: var(--muted);
+            font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .status:empty { display: none; }
   .status.good, .status.bad { display: inline-block; border-radius: 999px; padding: 0.22rem 0.8rem; }
   .status.good { color: var(--good); background: var(--good-bg); }
@@ -52,7 +57,7 @@
   .progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.12s linear; }
   .hint { margin-top: 0.55rem; font-size: 0.85rem; color: var(--muted); }
   .hint:empty { display: none; }
-  .spin { display: inline-block; width: 0.8em; height: 0.8em; margin-right: 0.5em; vertical-align: -0.05em;
+  .spin { display: inline-block; width: 0.85em; height: 0.85em; margin-right: 0.5em; vertical-align: -0.1em;
           border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
           animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -86,6 +91,13 @@
   #overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
              background: rgba(42, 120, 214, 0.12); border: 3px dashed var(--accent); font-size: 1.3rem;
              font-weight: 650; color: var(--accent); pointer-events: none; }
+  @media (max-width: 600px) {
+    main { padding: 1.5rem 0.85rem 2.25rem; }
+    h1 { font-size: 1.65rem; }
+    .card { padding: 1rem; }
+    .controls { gap: 0.65rem 1rem; }
+    .controls input[type="range"] { width: 6.2rem; }
+  }
 </style>
 </head>
 <body>
@@ -143,7 +155,7 @@ this computer. Watch its hidden layer neurons light up below as it reads and wri
 </section>
 
 <footer>
-  Inference runs locally in your browser (WebGPU / CPU). ·
+  Inference runs locally in your browser (WebGPU / CPU) ·
   <a href="https://github.com/AaronSpieler/elmnetwork" target="_blank" rel="noopener">GitHub</a> ·
   <a href="https://openreview.net/forum?id=zpewdRsVpA" target="_blank" rel="noopener">NeurIPS 2026 Paper</a> ·
   <a href="https://huggingface.co/AaronSpieler/elmnetwork" target="_blank" rel="noopener">Hugging Face</a>
@@ -923,6 +935,10 @@ const CACHE_NAME = "elmnetwork-models-v3";
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => Math.round(n).toLocaleString("en-US");
 const fmtMB = (bytes) => `${(bytes / 1e6).toFixed(bytes >= 1e8 ? 0 : 1)} MB`;
+const fmtEta = (sec) => {
+  const s = Math.max(1, Math.ceil(sec));
+  return s < 60 ? `~${s}s left` : `~${Math.floor(s / 60)}m ${s % 60}s left`;
+};
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const DEFAULT_PROMPTS = {
   enwik8: "'''Neuroscience''' is the [[science|scientific]] study of the [[nervous system]]. ",
@@ -961,7 +977,7 @@ function showNetwork() {
   const hidden = layers.length > 1 ? layers.slice(0, -1) : layers;
   const sizes = [...new Set(hidden.map((l) => l.num_neuron))];
   const layerNote = layers.length === 1 ? "single layer"
-    : hidden.length === 1 ? "per hidden layer" : `per hidden layer · ${hidden.length} layers`;
+    : hidden.length === 1 ? "per hidden layer" : `each · ${hidden.length} layers`;
   const tiles = [
     tile("Neuron count", sizes.map(fmt).join(" / "), layerNote),
     tile("Memory units", fmt(hidden[0].num_memory), "per neuron"),
@@ -1050,7 +1066,7 @@ async function fetchModelBuffer(path, expectedSize) {
       return await cached.arrayBuffer();
     }
   }
-  status(`<span class="spin"></span>Downloading ${esc(path)}…`);
+  status(`<span class="spin"></span><span id="dl-text">Downloading ${esc(path)}…</span>`);
   setProgress(0);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
@@ -1059,18 +1075,28 @@ async function fetchModelBuffer(path, expectedSize) {
   if (res.body && res.body.getReader) {
     const reader = res.body.getReader();
     const chunks = [];
-    let received = 0;
+    const start = performance.now();
+    const dlText = $("dl-text");
+    let received = 0, lastUpdate = 0;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
       received += value.byteLength;
+      const now = performance.now();
+      if (now - lastUpdate < 150 && received < total) continue;
+      lastUpdate = now;
       if (total > 0) {
         const pct = Math.min(100, Math.round((100 * received) / total));
-        status(`<span class="spin"></span>Downloading ${esc(path)}… ${fmtMB(received)} / ${fmtMB(total)} (${pct}%)`);
+        const elapsed = (now - start) / 1000;
+        const eta = elapsed >= 1 && received > 0 && received < total
+          ? ` · ${fmtEta((total - received) / (received / elapsed))}` : "";
+        if (dlText) {
+          dlText.textContent = `Downloading ${path}… ${(received / 1e6).toFixed(total >= 1e8 ? 0 : 1)} / ${fmtMB(total)} (${pct}%${eta})`;
+        }
         setProgress(received / total);
-      } else {
-        status(`<span class="spin"></span>Downloading ${esc(path)}… ${fmtMB(received)}`);
+      } else if (dlText) {
+        dlText.textContent = `Downloading ${path}… ${fmtMB(received)}`;
       }
     }
     const merged = new Uint8Array(received);
