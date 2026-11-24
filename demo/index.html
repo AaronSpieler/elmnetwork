@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ELM Network Inference</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --card: #ffffff; --text: #1b1b19; --muted: #686762; --line: #e3e2dd;
+    --accent: #2a78d6; --good: #1a7f37; --good-bg: #e8f5eb; --bad: #c62828; --bad-bg: #fdecec;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121211; --card: #1c1c1a; --text: #ecebe6; --muted: #a3a29c; --line: #32312e;
+            --accent: #4d93ea; --good: #4cc26a; --good-bg: #16301f; --bad: #ff6b6b; --bad-bg: #3a1c1c; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.5; }
+  main { max-width: 940px; margin: 0 auto; padding: 2.5rem 1.25rem 3rem; }
+  h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+  .lead { color: var(--muted); margin: 0.35rem 0 1.75rem; max-width: 640px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          padding: 1.15rem 1.35rem; margin-bottom: 1.1rem; }
+  .label { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+           color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+  .spread { justify-content: space-between; }
+  button, select { font: inherit; font-size: 0.9rem; color: var(--text); background: var(--card);
+                   border: 1px solid var(--line); border-radius: 8px; padding: 0.42rem 0.85rem; cursor: pointer; }
+  button:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled, select:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+                   padding: 0.48rem 1.4rem; }
+  .empty { margin-top: 1rem; border: 2px dashed var(--line); border-radius: 12px; padding: 1.6rem;
+           text-align: center; color: var(--muted); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.7rem;
+           margin-top: 1rem; }
+  .stat { background: var(--bg); border-radius: 10px; padding: 0.7rem 0.85rem; }
+  .stat-label { font-size: 0.78rem; color: var(--muted); }
+  .stat-value { font-size: 1.45rem; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
+  .stat-note { font-size: 0.75rem; color: var(--muted); white-space: nowrap; overflow: hidden;
+               text-overflow: ellipsis; }
+  .status { margin-top: 0.9rem; font-size: 0.9rem; color: var(--muted); }
+  .status:empty { display: none; }
+  .status.good, .status.bad { display: inline-block; border-radius: 999px; padding: 0.22rem 0.8rem; }
+  .status.good { color: var(--good); background: var(--good-bg); }
+  .status.bad { color: var(--bad); background: var(--bad-bg); }
+  .progress { margin-top: 0.6rem; height: 5px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.12s linear; }
+  .hint { margin-top: 0.55rem; font-size: 0.85rem; color: var(--muted); }
+  .hint:empty { display: none; }
+  .spin { display: inline-block; width: 0.8em; height: 0.8em; margin-right: 0.5em; vertical-align: -0.05em;
+          border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+          animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .controls { gap: 1.4rem; font-size: 0.88rem; color: var(--muted); }
+  .control { display: flex; align-items: center; gap: 0.5rem; }
+  .controls input[type="range"] { width: 7.5rem; accent-color: var(--accent); }
+  .controls input.value { width: 3.6rem; font: inherit; text-align: center; color: var(--text);
+                          background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+                          padding: 0.15rem 0.3rem; font-variant-numeric: tabular-nums;
+                          appearance: textfield; -moz-appearance: textfield; }
+  .controls input.value:focus { border-color: var(--accent); outline: none; }
+  .controls input.value::-webkit-outer-spin-button,
+  .controls input.value::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  #box { margin: 0.8rem 0; min-height: 14rem; padding: 0.8rem 0.95rem; border: 1px solid #8886;
+         border-radius: 8px; font: 14px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word;
+         outline: none; cursor: text; }
+  #box:focus { border-color: var(--accent); }
+  #read, #cursor.prompt { opacity: 0.55; }
+  #unread { opacity: 0.25; }
+  #cursor { border-radius: 2px; }
+  .phase { font-size: 0.88rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  figure.grid { margin: 0.85rem 0 0.15rem; }
+  figure.grid figcaption { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.35rem; }
+  .grid-stats { font-size: 0.88rem; color: var(--muted); margin-top: 0.45rem; min-height: 1.3em;
+                font-variant-numeric: tabular-nums; }
+  figure.grid canvas { display: block; width: 100%; image-rendering: pixelated;
+                       border-radius: 4px; background: #8881; border: 1px solid #8884; }
+  footer { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 1.5rem; }
+  footer a { color: var(--muted); text-underline-offset: 2px; }
+  footer a:hover { color: var(--text); }
+  #overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+             background: rgba(42, 120, 214, 0.12); border: 3px dashed var(--accent); font-size: 1.3rem;
+             font-weight: 650; color: var(--accent); pointer-events: none; }
+</style>
+</head>
+<body>
+<main>
+<h1>ELM Network Inference</h1>
+<p class="lead">An ELM Network reads your text and continues it, one character at a time, running live on
+this computer. Watch its hidden layer neurons light up below as it reads and writes.</p>
+
+<section class="card" id="network">
+  <div class="row spread">
+    <div class="label">Network Stats</div>
+    <div class="row">
+      <select id="hf-model" aria-label="Hugging Face models">
+        <option value="">Hugging Face Models…</option>
+      </select>
+      <button id="choose">Local File</button>
+      <input id="file" type="file" accept=".bin" hidden>
+    </div>
+  </div>
+  <div class="empty" id="empty">Select a model above, or drop an ELM Network (.bin) file anywhere on this page.</div>
+  <div class="stats" id="stats" hidden></div>
+  <div class="status" id="status"></div>
+  <div class="progress" id="progress" hidden><div class="progress-bar" id="progress-bar"></div></div>
+  <div class="hint" id="hint"></div>
+</section>
+
+<section class="card">
+  <div class="row spread">
+    <div class="label">Text Generation</div>
+    <div class="row controls">
+      <div class="control">Length
+        <input id="length-range" type="range" min="1" max="1000" step="1" value="500" aria-label="Length">
+        <input id="length" class="value" type="number" min="1" step="1" value="500" aria-label="Length in characters">
+      </div>
+      <div class="control" title="Sampling temperature: 0 always picks the most likely next character; higher values let less likely ones through">Randomness
+        <input id="temperature-range" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="Randomness">
+        <input id="temperature" class="value" type="number" min="0" max="1" step="0.01" value="0.80" aria-label="Randomness (sampling temperature)">
+      </div>
+    </div>
+  </div>
+  <div id="box" tabindex="0" spellcheck="false"></div>
+  <div class="row spread">
+    <span class="phase" id="phase"></span>
+    <div class="row">
+      <button id="clear">Clear</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="generate" class="primary" disabled>Generate</button>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="activity" hidden>
+  <div class="label">Hidden Layer Activity</div>
+  <div id="viz"></div>
+</section>
+
+<footer>
+  Inference runs locally in your browser (WebGPU / CPU). ·
+  <a href="https://github.com/AaronSpieler/elmnetwork" target="_blank" rel="noopener">GitHub</a> ·
+  <a href="https://openreview.net/forum?id=zpewdRsVpA" target="_blank" rel="noopener">NeurIPS 2026 Paper</a> ·
+  <a href="https://huggingface.co/AaronSpieler/elmnetwork" target="_blank" rel="noopener">Hugging Face</a>
+</footer>
+</main>
+<div id="overlay" hidden>Drop to load this ELM Network</div>
+
+<script id="engine">
+"use strict";
+// Self-contained ELM Network inference engine (no DOM access).
+// Ports src/models/elm_neuron.py & fused_layer.py: one WebGPU workgroup per neuron
+// computes its branch sums, MLP, memory update, high-pass filter, and activation.
+const ELM = (() => {
+  const BLOCK = 32;  // characters per GPU submission (sampling runs on the GPU)
+  const FORMAT = 3;
+  const ACTS = { identity: 0, relu: 1, spike: 2 };
+  const MLP_ACTS = { relu: 0, relu_squared: 1, silu: 2 };
+
+  // ---------- binary model file: "ELMD", format, header length, JSON header, arrays ----------
+  function parseModel(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (bytes.length < 12 || magic !== "ELMD") throw new Error("this is not an ELM model file");
+    const view = new DataView(buffer);
+    const format = view.getUint32(4, true);
+    if (format !== FORMAT) throw new Error(`model file format ${format}; this page reads format ${FORMAT}`);
+    const headLength = view.getUint32(8, true);
+    if (bytes.length < 12 + headLength) throw new Error("truncated ELM model file");
+    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(12, 12 + headLength)));
+    const base = Math.ceil((12 + headLength) / 16) * 16;
+    const types = { f32: Float32Array, u32: Uint32Array, i32: Int32Array };
+    const arrays = {};
+    for (const [name, [dtype, offset, length]] of Object.entries(header.arrays)) {
+      arrays[name] = new types[dtype](buffer, base + offset, length);
+    }
+    return { header, arrays };
+  }
+
+  function sizes(meta) {
+    const nb = meta.num_branch, m = meta.num_memory, h = meta.num_hidden;
+    const k2 = Math.ceil((nb + m) / 2), h2 = Math.ceil(h / 2), ps2 = meta.syn_pairs;
+    const depth1 = meta.mlp_depth === 1;
+    return {
+      nb, m, h, k2, h2, ps2, depth1,
+      wsWords: ps2 * nb,                     // per neuron
+      mlp1Words: depth1 ? k2 * h : k2 * m,   // per neuron
+      mlp2Words: depth1 ? h2 * m : 0,        // per neuron
+    };
+  }
+
+  // greedy at temperature 0, else softmax sampling
+  function chooseToken(logits, temperature, random) {
+    let best = 0;
+    for (let v = 1; v < logits.length; v++) if (logits[v] > logits[best]) best = v;
+    if (!(temperature > 0)) return best;
+    let total = 0;
+    for (let v = 0; v < logits.length; v++) total += Math.exp((logits[v] - logits[best]) / temperature);
+    let r = random * total;
+    for (let v = 0; v < logits.length; v++) {
+      r -= Math.exp((logits[v] - logits[best]) / temperature);
+      if (r <= 0) return v;
+    }
+    return best;
+  }
+
+  // ---------- GPU: WGSL ----------
+  function consts(values) {
+    const floats = new Set(["GAIN", "INSCALE", "KAPPA_R"]);
+    const bools = new Set(["FIRST", "HIGH_PASS", "DEPTH1"]);
+    return Object.entries(values).map(([name, v]) => {
+      if (floats.has(name)) return `const ${name}: f32 = ${Math.fround(v).toPrecision(9)}f;`;
+      if (bools.has(name)) return `const ${name}: bool = ${v ? "true" : "false"};`;
+      if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`bad shader constant ${name}`);
+      return `const ${name}: u32 = ${v}u;`;
+    }).join("\n") + "\n";
+  }
+
+  const LAYER_WGSL = /* wgsl */ `
+struct Slice { n0: u32, cnt: u32, w2off: u32, pools: u32 }
+@group(0) @binding(0) var<storage, read> ws: array<u32>;         // (neuron, synapse pair, branch) f16 pairs
+@group(0) @binding(1) var<storage, read> mlp: array<u32>;        // w1 (neuron, input pair, unit), then w2
+@group(0) @binding(2) var<storage, read> idx: array<u32>;        // (neuron, branch) -> pool; pools (u16 pairs)
+@group(0) @binding(3) var<storage, read> P: array<f32>;          // per-neuron parameters (km, kl, bias, wy, mlp bias)
+@group(0) @binding(4) var<storage, read_write> S: array<f32>;    // memory (neuron, unit), optional high-pass state
+@group(0) @binding(5) var<storage, read> aprev: array<f32>;      // this layer's previous activity
+@group(0) @binding(6) var<storage, read_write> aout: array<f32>; // this layer's new activity
+@group(0) @binding(7) var<storage, read> inp: array<u32>;        // first layer: control (token); else input activity
+@group(0) @binding(8) var<uniform> sl: Slice;
+
+var<workgroup> z: array<f32, KPAD>;   // MLP input: branch sums, decayed memory
+var<workgroup> hid: array<f32, HPAD>;
+var<workgroup> md: array<f32, M>;     // decayed memory
+var<workgroup> mo: array<f32, M>;     // MLP output, then readout terms
+
+fn slot_value(s: u32, tok: u32) -> f32 {
+  if (s < NIN) {
+    if (FIRST) { return select(0.0, INSCALE, s == tok); }
+    return bitcast<f32>(inp[s]);
+  }
+  return aprev[s - NIN];
+}
+
+fn ctanh(v: f32) -> f32 {  // 1.7159 tanh(2v/3), from exp for cross-GPU parity
+  let x = v * (2.0 / 3.0);
+  let e = exp(-2.0 * abs(x));
+  let t = (1.0 - e) / (1.0 + e);
+  return 1.7159 * select(-t, t, x >= 0.0);
+}
+
+fn mlp_activate(x: f32) -> f32 {
+  if (MLP_ACT == 0u) { return max(x, 0.0); }
+  if (MLP_ACT == 1u) { let r = max(x, 0.0); return r * r; }
+  return x / (1.0 + exp(-x));
+}
+
+@compute @workgroup_size(WG)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+  let il = wid.x;
+  let i = sl.n0 + il;
+  var tok = 0u;
+  if (FIRST) { tok = inp[CUR]; }
+
+  // synapses -> branch sums (coalesced across branches)
+  for (var b = lid; b < NB; b += WG) {
+    let pbase = sl.pools + idx[il * NB + b] * PS2;
+    var sum = 0.0;
+    for (var j = 0u; j < PS2; j++) {
+      let w = unpack2x16float(ws[(il * PS2 + j) * NB + b]);
+      let s = idx[pbase + j];
+      sum += w.x * slot_value(s & 0xFFFFu, tok) + w.y * slot_value(s >> 16u, tok);
+    }
+    z[b] = sum * GAIN;
+  }
+
+  // decayed memory
+  for (var q = lid; q < M; q += WG) {
+    let d = P[O_KM + i * M + q] * S[i * M + q];
+    md[q] = d;
+    z[NB + q] = d;
+  }
+  for (var q = NB + M + lid; q < KPAD; q += WG) { z[q] = 0.0; }
+  workgroupBarrier();
+
+  // MLP: one hidden layer or linear map
+  if (DEPTH1) {
+    for (var c = lid; c < H; c += WG) {
+      var sum = P[O_B1 + i * H + c];
+      for (var j = 0u; j < K2; j++) {
+        let w = unpack2x16float(mlp[(il * K2 + j) * H + c]);
+        sum += w.x * z[2u * j] + w.y * z[2u * j + 1u];
+      }
+      hid[c] = mlp_activate(sum);
+    }
+    for (var c = H + lid; c < HPAD; c += WG) { hid[c] = 0.0; }
+    workgroupBarrier();
+    for (var q = lid; q < M; q += WG) {
+      var sum = P[O_B2 + i * M + q];
+      for (var c = 0u; c < H2; c++) {
+        let w = unpack2x16float(mlp[sl.w2off + (il * H2 + c) * M + q]);
+        sum += w.x * hid[2u * c] + w.y * hid[2u * c + 1u];
+      }
+      mo[q] = sum;
+    }
+  } else {
+    for (var q = lid; q < M; q += WG) {
+      var sum = P[O_B0 + i * M + q];
+      for (var j = 0u; j < K2; j++) {
+        let w = unpack2x16float(mlp[(il * K2 + j) * M + q]);
+        sum += w.x * z[2u * j] + w.y * z[2u * j + 1u];
+      }
+      mo[q] = sum;
+    }
+  }
+  workgroupBarrier();
+
+  // memory update and readout terms
+  for (var q = lid; q < M; q += WG) {
+    let mnew = md[q] + (1.0 - P[O_KL + i * M + q]) * ctanh(mo[q]);
+    S[i * M + q] = mnew;
+    mo[q] = P[O_WY + i * M + q] * mnew;
+  }
+  workgroupBarrier();
+
+  // readout, high-pass filter, bias, activation
+  if (lid == 0u) {
+    var pre = 0.0;
+    for (var q = 0u; q < M; q++) { pre += mo[q]; }
+    if (HIGH_PASS) {
+      let r = KAPPA_R * S[NN * M + i] + (1.0 - KAPPA_R) * pre;
+      S[NN * M + i] = r;
+      pre = pre - r;
+    }
+    var a = pre + P[O_BIAS + i];
+    if (ACT == 1u) { a = max(a, 0.0); }
+    else if (ACT == 2u) { a = select(0.0, 1.0, a > 0.0); }
+    aout[i] = a;
+  }
+}`;
+
+  const SAMPLE_WGSL = /* wgsl */ `
+struct Prm { temperature: f32, p1: f32, p2: f32, p3: f32 }
+@group(0) @binding(0) var<storage, read> ow: array<f32>;            // (neuron, symbol) weights, then biases
+@group(0) @binding(1) var<storage, read> act: array<f32>;           // last layer's activity
+@group(0) @binding(2) var<storage, read_write> ctl: array<u32>;     // step, given tokens, logged steps, token
+@group(0) @binding(3) var<storage, read> given: array<u32>;         // prompt or self-test tokens
+@group(0) @binding(4) var<storage, read> rnd: array<f32>;           // one uniform number per step
+@group(0) @binding(5) var<storage, read_write> tok: array<u32>;     // tok[t + 1]: input of step t + 1
+@group(0) @binding(6) var<storage, read_write> hist: array<f32>;    // logits of logged steps
+@group(0) @binding(7) var<uniform> prm: Prm;
+var<workgroup> lg: array<f32, VPAD>;
+
+@compute @workgroup_size(WG)
+fn main(@builtin(local_invocation_index) lid: u32) {
+  let t = ctl[0];
+  for (var v = lid; v < V; v += WG) {
+    var s = ow[NL * V + v];
+    for (var j = 0u; j < NL; j++) { s += ow[j * V + v] * act[j]; }
+    lg[v] = s;
+  }
+  workgroupBarrier();
+  if (t < ctl[2]) {
+    for (var v = lid; v < V; v += WG) { hist[t * V + v] = lg[v]; }
+  }
+  if (lid == 0u) {
+    var next = 0u;
+    if (t + 1u < ctl[1]) {
+      next = given[t + 1u];
+    } else {
+      var best = 0u;
+      for (var v = 1u; v < V; v++) { if (lg[v] > lg[best]) { best = v; } }
+      next = best;
+      let temp = prm.temperature;
+      if (temp > 0.0) {
+        var total = 0.0;
+        for (var v = 0u; v < V; v++) { total += exp((lg[v] - lg[best]) / temp); }
+        var r = rnd[t] * total;
+        for (var v = 0u; v < V; v++) {
+          r -= exp((lg[v] - lg[best]) / temp);
+          if (r <= 0.0) { next = v; break; }
+        }
+      }
+    }
+    tok[t + 1u] = next;
+    ctl[3] = next;
+    ctl[0] = t + 1u;
+  }
+}`;
+
+  const LOG_WGSL = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> act: array<f32>;
+@group(0) @binding(1) var<storage, read> ctl: array<u32>;
+@group(0) @binding(2) var<storage, read_write> alog: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  if (g.x < NN) { alog[(ctl[0] % CAP) * NN + g.x] = act[g.x]; }
+}`;
+
+  const shownLayers = (header) =>
+    header.layers.length > 1 ? header.layers.slice(0, -1).map((_, l) => l) : [0];
+
+  function gridShape(n) {
+    let best = null;
+    for (let rows = 1; rows * rows <= n; rows++) {
+      const ratio = n / rows / rows;
+      if (n % rows || ratio < 2 || ratio > 8) continue;
+      const score = Math.abs(Math.log(ratio / 4));
+      if (!best || score < best.score - 1e-9) best = { rows, score };
+    }
+    if (best) return [n / best.rows, best.rows];
+    const rows = Math.max(1, Math.round(Math.sqrt(n / 4)));
+    return [Math.ceil(n / rows), rows];
+  }
+
+  function activityScale(blocks) {
+    let count = 0;
+    for (const a of blocks) for (const v of a) if (v > 0) count++;
+    if (count === 0) return 1;
+    const values = new Float32Array(count);
+    let k = 0;
+    for (const a of blocks) for (const v of a) if (v > 0) values[k++] = v;
+    values.sort();
+    return values[Math.min(count - 1, Math.floor(0.99 * count))];
+  }
+
+  const usage = () => ({
+    S: GPUBufferUsage.STORAGE, C: GPUBufferUsage.COPY_DST, R: GPUBufferUsage.COPY_SRC,
+    U: GPUBufferUsage.UNIFORM, M: GPUBufferUsage.MAP_READ,
+  });
+
+  class GpuEngine {
+    static async create(model, gpu, options = {}) {
+      const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+      if (!adapter) throw new Error("no WebGPU adapter");
+      const L = adapter.limits;
+      const device = await adapter.requestDevice({
+        requiredLimits: {
+          maxStorageBufferBindingSize: L.maxStorageBufferBindingSize,
+          maxBufferSize: L.maxBufferSize,
+        },
+      }).catch(() => adapter.requestDevice());
+      const info = adapter.info || {};
+      const name = [info.vendor, info.architecture, info.description].filter(Boolean).join(" ");
+      device.pushErrorScope("validation");
+      device.pushErrorScope("out-of-memory");
+      const engine = new GpuEngine(model, device, `WebGPU${name ? ` (${name})` : ""}`, options);
+      engine.adapterInfo = { vendor: info.vendor || "", architecture: info.architecture || "" };
+      const error = (await device.popErrorScope()) || (await device.popErrorScope());
+      if (error) throw new Error(error.message);
+      return engine;
+    }
+
+    constructor(model, device, kind, options) {
+      const { header, arrays } = model;
+      const u = usage();
+      this.device = device;
+      this.kind = kind;
+      this.V = header.vocab_size;
+      this.staging = [];
+      this.capacity = { steps: 0, given: 0, hist: 0 };
+      const limit = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize,
+                             options.maxSliceBytes || Infinity);
+      this.ctl = this.buffer(new Uint32Array(4), u.S | u.C);
+      this.prm = this.buffer(new Float32Array(4), u.U | u.C);
+      this.layers = header.layers.map((meta, l) => {
+        const z = sizes(meta), n = meta.num_neuron, a = (key) => arrays[`L${l}.${key}`];
+        const wg = Math.min(256, Math.max(64, 2 ** Math.ceil(Math.log2(Math.max(z.nb, z.h, z.m)))));
+        const o = meta.p;
+        const act = ACTS[meta.activation];
+        if (act === undefined) throw new Error(`unsupported activation ${meta.activation}`);
+        const mlpAct = MLP_ACTS[meta.mlp_act ?? "relu_squared"];
+        if (mlpAct === undefined) throw new Error(`unsupported mlp_act ${meta.mlp_act}`);
+        const constants = {
+          NB: z.nb, PS2: z.ps2, M: z.m, H: z.h, K2: z.k2, H2: z.h2,
+          NIN: meta.num_input, NN: n, WG: wg, KPAD: 2 * z.k2, HPAD: Math.max(2, 2 * z.h2),
+          GAIN: meta.gain, INSCALE: header.input_scale, KAPPA_R: meta.kappa_r || 0.0,
+          FIRST: l === 0 ? 1 : 0, ACT: act,
+          HIGH_PASS: meta.high_pass ? 1 : 0, DEPTH1: z.depth1 ? 1 : 0, MLP_ACT: mlpAct, CUR: 3,
+          O_KM: o.km, O_KL: o.kl, O_BIAS: o.bias, O_WY: o.wy,
+          O_B1: o.b1 || 0, O_B2: o.b2 || 0, O_B0: o.b0 || 0,
+        };
+        const pipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: { module: device.createShaderModule({ code: consts(constants) + LAYER_WGSL }), entryPoint: "main" },
+        });
+        const layer = {
+          n, pipeline, a0: a("a0"), S0: a("S0"),
+          P: this.buffer(a("P"), u.S),
+          S: this.buffer(a("S0"), u.S | u.C),
+          act: [this.buffer(a("a0"), u.S | u.C), this.buffer(a("a0"), u.S | u.C)],
+        };
+        const perNeuron = 4 * Math.max(z.wsWords, z.mlp1Words + z.mlp2Words, z.nb * (1 + z.ps2));
+        const per = Math.max(1, Math.floor(limit / perNeuron));
+        layer.slices = [];
+        for (let n0 = 0; n0 < n; n0 += per) {
+          const cnt = Math.min(per, n - n0);
+          const idx = this.sliceWiring(a("pool_map"), a("pools"), n0, cnt, z, meta.num_pools);
+          const mlp = this.sliceMlp(a("mlp1"), a("mlp2"), n0, cnt, z);
+          layer.slices.push({
+            cnt,
+            ws: this.buffer(a("ws").subarray(n0 * z.wsWords, (n0 + cnt) * z.wsWords), u.S),
+            mlp, idx,
+            uniform: this.buffer(new Uint32Array([n0, cnt, cnt * z.mlp1Words, cnt * z.nb]), u.U),
+          });
+        }
+        return layer;
+      });
+      const last = this.layers[this.layers.length - 1];
+      this.out = this.buffer(arrays.out, u.S);
+      this.sampler = device.createComputePipeline({
+        layout: "auto",
+        compute: {
+          module: device.createShaderModule({
+            code: consts({ V: this.V, NL: last.n, WG: 256, VPAD: Math.max(1, this.V) }) + SAMPLE_WGSL,
+          }),
+          entryPoint: "main",
+        },
+      });
+      for (const [l, layer] of this.layers.entries()) {
+        for (const s of layer.slices) {
+          s.bind = [0, 1].map((p) => device.createBindGroup({
+            layout: layer.pipeline.getBindGroupLayout(0),
+            entries: [s.ws, s.mlp, s.idx, layer.P, layer.S, layer.act[p], layer.act[1 - p],
+                      l === 0 ? this.ctl : this.layers[l - 1].act[1 - p], s.uniform]
+              .map((buffer, binding) => ({ binding, resource: { buffer } })),
+          }));
+        }
+      }
+      this.shown = shownLayers(header);
+      this.logs = this.shown.map((l) => {
+        const layer = this.layers[l];
+        const pipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({ code: consts({ NN: layer.n, CAP: BLOCK }) + LOG_WGSL }),
+            entryPoint: "main",
+          },
+        });
+        const buffer = device.createBuffer({ size: 4 * BLOCK * layer.n, usage: u.S | u.R });
+        const bind = [0, 1].map((p) => device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [layer.act[1 - p], this.ctl, buffer].map((b, binding) => ({ binding, resource: { buffer: b } })),
+        }));
+        layer.log = { pipeline, buffer, bind, n: layer.n, groups: Math.ceil(layer.n / 256), staging: [] };
+        return layer.log;
+      });
+    }
+
+    buffer(data, usageFlags) {
+      const size = Math.max(16, Math.ceil(data.byteLength / 16) * 16);
+      const buffer = this.device.createBuffer({ size, usage: usageFlags, mappedAtCreation: true });
+      new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      buffer.unmap();
+      return buffer;
+    }
+
+    sliceWiring(poolMap, pools, n0, cnt, z, numPools) {
+      const used = new Int32Array(numPools).fill(-1);
+      const smap = new Uint32Array(cnt * z.nb);
+      let count = 0;
+      for (let e = 0; e < cnt * z.nb; e++) {
+        const id = poolMap[n0 * z.nb + e];
+        if (used[id] < 0) used[id] = count++;
+        smap[e] = used[id];
+      }
+      const idx = new Uint32Array(cnt * z.nb + count * z.ps2);
+      idx.set(smap);
+      for (let id = 0; id < numPools; id++) {
+        if (used[id] >= 0) idx.set(pools.subarray(id * z.ps2, (id + 1) * z.ps2), cnt * z.nb + used[id] * z.ps2);
+      }
+      return this.buffer(idx, GPUBufferUsage.STORAGE);
+    }
+
+    sliceMlp(mlp1, mlp2, n0, cnt, z) {
+      const w1 = mlp1.subarray(n0 * z.mlp1Words, (n0 + cnt) * z.mlp1Words);
+      const w2 = mlp2 ? mlp2.subarray(n0 * z.mlp2Words, (n0 + cnt) * z.mlp2Words) : new Uint32Array(0);
+      const size = Math.max(16, Math.ceil((w1.byteLength + w2.byteLength) / 16) * 16);
+      const buffer = this.device.createBuffer({ size, usage: GPUBufferUsage.STORAGE, mappedAtCreation: true });
+      const view = new Uint32Array(buffer.getMappedRange());
+      view.set(w1);
+      view.set(w2, w1.length);
+      buffer.unmap();
+      return buffer;
+    }
+
+    ensureCapacity(steps, given, hist) {
+      const u = usage(), cap = this.capacity, grow = (x) => 2 ** Math.ceil(Math.log2(Math.max(64, x)));
+      let changed = false;
+      if (steps + 1 > cap.steps) {
+        if (this.tok) this.tok.destroy();
+        if (this.rnd) this.rnd.destroy();
+        cap.steps = grow(steps + 1);
+        this.tok = this.device.createBuffer({ size: 4 * cap.steps, usage: u.S | u.C | u.R });
+        this.rnd = this.device.createBuffer({ size: 4 * cap.steps, usage: u.S | u.C });
+        changed = true;
+      }
+      if (given > cap.given) {
+        if (this.given) this.given.destroy();
+        cap.given = grow(given);
+        this.given = this.device.createBuffer({ size: 4 * cap.given, usage: u.S | u.C });
+        changed = true;
+      }
+      if (Math.max(1, hist) * this.V > cap.hist) {
+        if (this.hist) this.hist.destroy();
+        cap.hist = grow(Math.max(1, hist) * this.V);
+        this.hist = this.device.createBuffer({ size: 4 * cap.hist, usage: u.S | u.R });
+        changed = true;
+      }
+      if (changed) {
+        const last = this.layers[this.layers.length - 1];
+        this.sampleBind = [0, 1].map((p) => this.device.createBindGroup({
+          layout: this.sampler.getBindGroupLayout(0),
+          entries: [this.out, last.act[1 - p], this.ctl, this.given, this.rnd, this.tok, this.hist, this.prm]
+            .map((buffer, binding) => ({ binding, resource: { buffer } })),
+        }));
+      }
+    }
+
+    encodeStep(pass, t) {
+      const p = t & 1;
+      for (const layer of this.layers) {
+        pass.setPipeline(layer.pipeline);
+        for (const s of layer.slices) {
+          pass.setBindGroup(0, s.bind[p]);
+          pass.dispatchWorkgroups(s.cnt);
+        }
+        if (layer.log) {
+          pass.setPipeline(layer.log.pipeline);
+          pass.setBindGroup(0, layer.log.bind[p]);
+          pass.dispatchWorkgroups(layer.log.groups);
+        }
+      }
+      pass.setPipeline(this.sampler);
+      pass.setBindGroup(0, this.sampleBind[p]);
+      pass.dispatchWorkgroups(1);
+    }
+
+    async run({ given, steps, temperature = 0, histSteps = 0, onBlock = null, shouldStop = () => false }) {
+      const q = this.device.queue, u = usage();
+      this.ensureCapacity(steps, given.length, histSteps);
+      for (const layer of this.layers) {
+        q.writeBuffer(layer.act[0], 0, layer.a0);
+        q.writeBuffer(layer.S, 0, layer.S0);
+      }
+      q.writeBuffer(this.ctl, 0, new Uint32Array([0, given.length, histSteps, given[0]]));
+      q.writeBuffer(this.given, 0, given);
+      q.writeBuffer(this.prm, 0, new Float32Array([temperature, 0, 0, 0]));
+      const pending = [];
+      let t = 0;
+      while (t < steps && !shouldStop()) {
+        const k = Math.min(BLOCK, steps - t);
+        const random = new Float32Array(k);
+        for (let i = 0; i < k; i++) random[i] = Math.random();
+        q.writeBuffer(this.rnd, 4 * t, random);
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        for (let s = t; s < t + k; s++) this.encodeStep(pass, s);
+        pass.end();
+        const staging = this.staging.pop() || this.device.createBuffer({ size: 4 * BLOCK, usage: u.M | u.C });
+        encoder.copyBufferToBuffer(this.tok, 4 * (t + 1), staging, 0, 4 * k);
+        const logs = this.logs.map((log) => {
+          const s = log.staging.pop() || this.device.createBuffer({ size: 4 * BLOCK * log.n, usage: u.M | u.C });
+          encoder.copyBufferToBuffer(log.buffer, 4 * (t % BLOCK) * log.n, s, 0, 4 * k * log.n);
+          return s;
+        });
+        q.submit([encoder.finish()]);
+        const mapped = Promise.all([staging, ...logs].map((s) => s.mapAsync(GPUMapMode.READ)));
+        pending.push({ t, k, staging, logs, mapped });
+        t += k;
+        if (pending.length >= 2) await this.deliver(pending.shift(), onBlock);
+      }
+      while (pending.length) await this.deliver(pending.shift(), onBlock);
+      return t;
+    }
+
+    async deliver(block, onBlock) {
+      await block.mapped;
+      const tokens = new Uint32Array(block.staging.getMappedRange(0, 4 * block.k).slice(0));
+      block.staging.unmap();
+      this.staging.push(block.staging);
+      const acts = block.logs.map((s, j) => {
+        const log = this.logs[j];
+        const a = new Float32Array(s.getMappedRange(0, 4 * block.k * log.n).slice(0));
+        s.unmap();
+        log.staging.push(s);
+        return a;
+      });
+      if (onBlock) onBlock(block.t, tokens, acts);
+    }
+
+    destroy() {
+      this.device.destroy();
+    }
+
+    async readHist(steps) {
+      const size = 4 * steps * this.V;
+      const staging = this.device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.hist, 0, staging, 0, size);
+      this.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      staging.destroy();
+      return out;
+    }
+  }
+
+  // ---------- CPU fallback (identical math when WebGPU is unavailable) ----------
+  const F16 = (() => {
+    const table = new Float32Array(65536);
+    for (let h = 0; h < 65536; h++) {
+      const e = (h >> 10) & 31, f = h & 1023;
+      const v = e === 0 ? f * 2 ** -24 : e === 31 ? (f ? NaN : Infinity) : (1 + f / 1024) * 2 ** (e - 15);
+      table[h] = h & 0x8000 ? -v : v;
+    }
+    return table;
+  })();
+
+  function mlpActivate(x, act) {
+    if (act === 0) return x > 0 ? x : 0;
+    if (act === 1) return x > 0 ? x * x : 0;
+    return x / (1 + Math.exp(-x));
+  }
+
+  class CpuEngine {
+    constructor(model) {
+      const { header, arrays } = model;
+      this.kind = "CPU (no WebGPU: slower)";
+      this.V = header.vocab_size;
+      this.inputScale = header.input_scale;
+      this.out = arrays.out;
+      this.layers = header.layers.map((meta, l) => {
+        const z = sizes(meta), n = meta.num_neuron, a = (key) => arrays[`L${l}.${key}`];
+        const act = ACTS[meta.activation];
+        if (act === undefined) throw new Error(`unsupported activation ${meta.activation}`);
+        const mlpAct = MLP_ACTS[meta.mlp_act ?? "relu_squared"];
+        if (mlpAct === undefined) throw new Error(`unsupported mlp_act ${meta.mlp_act}`);
+        return {
+          meta, z, n, actMode: act, mlpAct, ws: a("ws"), poolMap: a("pool_map"), pools: a("pools"),
+          mlp1: a("mlp1"), mlp2: a("mlp2"), P: a("P"), a0: a("a0"), S0: a("S0"), o: meta.p,
+          u: new Float32Array(meta.num_input + n), act: new Float32Array(n), next: new Float32Array(n),
+          S: new Float32Array(a("S0").length), zs: new Float64Array(2 * z.k2),
+          hid: new Float64Array(Math.max(2, 2 * z.h2)), md: new Float64Array(z.m), mo: new Float64Array(z.m),
+          pbase: new Int32Array(z.nb),
+        };
+      });
+      this.x = new Float32Array(this.V);
+      this.logits = new Float32Array(this.V);
+      this.shown = shownLayers(header);
+    }
+
+    reset() {
+      for (const L of this.layers) {
+        L.act.set(L.a0);
+        L.S.set(L.S0);
+      }
+    }
+
+    stepLayer(L, x) {
+      const { meta, z, n, mlpAct, ws, poolMap, pools, mlp1, mlp2, P, o, u, act, next, S, zs, hid, md, mo, pbase } = L;
+      const { nb, m, h, k2, h2, ps2, depth1 } = z, nin = meta.num_input;
+      u.set(x, 0);
+      u.set(act, nin);
+      for (let i = 0; i < n; i++) {
+        zs.fill(0);
+        for (let b = 0; b < nb; b++) pbase[b] = poolMap[i * nb + b] * ps2;
+        for (let j = 0; j < ps2; j++) {
+          const row = (i * ps2 + j) * nb;
+          for (let b = 0; b < nb; b++) {
+            const w = ws[row + b], s = pools[pbase[b] + j];
+            zs[b] += F16[w & 0xffff] * u[s & 0xffff] + F16[w >>> 16] * u[s >>> 16];
+          }
+        }
+        for (let b = 0; b < nb; b++) zs[b] *= meta.gain;
+        for (let q = 0; q < m; q++) {
+          md[q] = P[o.km + i * m + q] * S[i * m + q];
+          zs[nb + q] = md[q];
+        }
+        if (depth1) {
+          for (let c = 0; c < h; c++) hid[c] = P[o.b1 + i * h + c];
+          hid.fill(0, h);
+          for (let j = 0; j < k2; j++) {
+            const row = (i * k2 + j) * h, za = zs[2 * j], zb = zs[2 * j + 1];
+            for (let c = 0; c < h; c++) {
+              const w = mlp1[row + c];
+              hid[c] += F16[w & 0xffff] * za + F16[w >>> 16] * zb;
+            }
+          }
+          for (let c = 0; c < h; c++) hid[c] = mlpActivate(hid[c], mlpAct);
+          for (let q = 0; q < m; q++) mo[q] = P[o.b2 + i * m + q];
+          for (let c = 0; c < h2; c++) {
+            const row = (i * h2 + c) * m, ha = hid[2 * c], hb = hid[2 * c + 1];
+            for (let q = 0; q < m; q++) {
+              const w = mlp2[row + q];
+              mo[q] += F16[w & 0xffff] * ha + F16[w >>> 16] * hb;
+            }
+          }
+        } else {
+          for (let q = 0; q < m; q++) mo[q] = P[o.b0 + i * m + q];
+          for (let j = 0; j < k2; j++) {
+            const row = (i * k2 + j) * m, za = zs[2 * j], zb = zs[2 * j + 1];
+            for (let q = 0; q < m; q++) {
+              const w = mlp1[row + q];
+              mo[q] += F16[w & 0xffff] * za + F16[w >>> 16] * zb;
+            }
+          }
+        }
+        let pre = 0;
+        for (let q = 0; q < m; q++) {
+          const mnew = md[q] + (1 - P[o.kl + i * m + q]) * Math.tanh(mo[q] * 2 / 3) * 1.7159;
+          S[i * m + q] = mnew;
+          pre += P[o.wy + i * m + q] * mnew;
+        }
+        if (meta.high_pass) {
+          const r = meta.kappa_r * S[n * m + i] + (1 - meta.kappa_r) * pre;
+          S[n * m + i] = r;
+          pre = pre - r;
+        }
+        let a = pre + P[o.bias + i];
+        if (L.actMode === 1) a = a > 0 ? a : 0;
+        else if (L.actMode === 2) a = a > 0 ? 1 : 0;
+        next[i] = a;
+      }
+      L.act = next;
+      L.next = act;
+      return L.act;
+    }
+
+    step(token) {
+      this.x.fill(0);
+      this.x[token] = this.inputScale;
+      let x = this.x;
+      for (const L of this.layers) x = this.stepLayer(L, x);
+      const V = this.V, nl = x.length, out = this.out;
+      for (let v = 0; v < V; v++) {
+        let s = out[nl * V + v];
+        for (let j = 0; j < nl; j++) s += out[j * V + v] * x[j];
+        this.logits[v] = s;
+      }
+      return this.logits;
+    }
+
+    async run({ given, steps, temperature = 0, histSteps = 0, onBlock = null, shouldStop = () => false }) {
+      this.reset();
+      this.hist = new Float32Array(Math.max(1, histSteps) * this.V);
+      let token = given[0], t = 0;
+      while (t < steps && !shouldStop()) {
+        const k = Math.min(4, steps - t), tokens = new Uint32Array(k);
+        const acts = this.shown.map((l) => new Float32Array(k * this.layers[l].n));
+        for (let s = 0; s < k; s++, t++) {
+          const logits = this.step(token);
+          this.shown.forEach((l, j) => acts[j].set(this.layers[l].act, s * this.layers[l].n));
+          if (t < histSteps) this.hist.set(logits, t * this.V);
+          token = t + 1 < given.length ? given[t + 1] : chooseToken(logits, temperature, Math.random());
+          tokens[s] = token;
+        }
+        if (onBlock) onBlock(t - k, tokens, acts);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      return t;
+    }
+
+    async readHist(steps) {
+      return this.hist.subarray(0, steps * this.V);
+    }
+
+    destroy() {}
+  }
+
+  // ---------- self-test against the exporter's reference logits ----------
+  async function selfTest(engine, model) {
+    const { header, arrays } = model;
+    const tokens = arrays["test.tokens"], expected = arrays["test.logits"];
+    const V = header.vocab_size, steps = tokens.length;
+    const activity = engine.shown.map(() => []);
+    const onBlock = (t0, block, acts) => acts.forEach((a, j) => activity[j].push(a));
+    await engine.run({ given: tokens, steps, histSteps: steps, onBlock });
+    const scales = activity.map(activityScale);
+    const logits = await engine.readHist(steps);
+    let maxDiff = 0, maxRef = 0, bits = 0;
+    for (let e = 0; e < steps * V; e++) {
+      maxDiff = Math.max(maxDiff, Math.abs(logits[e] - expected[e]));
+      maxRef = Math.max(maxRef, Math.abs(expected[e]));
+    }
+    for (let t = 0; t + 1 < steps; t++) {
+      let top = -Infinity, total = 0;
+      for (let v = 0; v < V; v++) top = Math.max(top, logits[t * V + v]);
+      for (let v = 0; v < V; v++) total += Math.exp(logits[t * V + v] - top);
+      bits += (Math.log(total) + top - logits[t * V + tokens[t + 1]]) / Math.LN2;
+    }
+    const passed = Number.isFinite(maxDiff) && maxDiff <= 1e-3 * Math.max(1, maxRef);
+    return { steps, maxDiff, maxRef, bpc: bits / Math.max(1, steps - 1), passed, scales };
+  }
+
+  async function createEngine(model, gpu, options) {
+    let reason = "no-webgpu";
+    if (gpu) {
+      try {
+        return await GpuEngine.create(model, gpu, options);
+      } catch (error) {
+        console.warn("WebGPU unavailable, using CPU:", error);
+        reason = /no WebGPU adapter/.test(error.message) ? "no-adapter" : "gpu-error";
+      }
+    }
+    const engine = new CpuEngine(model);
+    engine.fallbackReason = reason;
+    return engine;
+  }
+
+  return { parseModel, createEngine, selfTest, chooseToken, gridShape, GpuEngine, CpuEngine, BLOCK, FORMAT };
+})();
+</script>
+<script>
+"use strict";
+const HF_REPO = "AaronSpieler/elmnetwork";
+const CACHE_NAME = "elmnetwork-models-v3";
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => Math.round(n).toLocaleString("en-US");
+const fmtMB = (bytes) => `${(bytes / 1e6).toFixed(bytes >= 1e8 ? 0 : 1)} MB`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const DEFAULT_PROMPTS = {
+  enwik8: "'''Neuroscience''' is the [[science|scientific]] study of the [[nervous system]]. ",
+  tinystories: "Once upon a time, there was a little girl named Lily. ",
+};
+let model = null, engine = null, busy = false, stopRequested = false, promptIsDefault = true;
+
+// ---------- network card & Hugging Face discovery ----------
+function status(html, kind = "", title = "") {
+  const s = $("status");
+  s.className = `status ${kind}`;
+  s.innerHTML = html;
+  s.title = title;
+}
+
+function setProgress(fraction) {
+  const wrap = $("progress"), bar = $("progress-bar");
+  if (fraction === null) {
+    wrap.hidden = true;
+    bar.style.width = "0%";
+  } else {
+    wrap.hidden = false;
+    bar.style.width = `${Math.max(0, Math.min(100, fraction * 100)).toFixed(1)}%`;
+  }
+}
+
+function tile(label, value, note, id = "") {
+  const attr = id ? ` id="${esc(id)}"` : "";
+  return `<div class="stat"${attr}><div class="stat-label">${esc(label)}</div>` +
+         `<div class="stat-value">${esc(value)}</div>` +
+         `<div class="stat-note" title="${esc(note)}">${esc(note)}</div></div>`;
+}
+
+function showNetwork() {
+  const h = model.header, layers = h.layers;
+  const hidden = layers.length > 1 ? layers.slice(0, -1) : layers;
+  const sizes = [...new Set(hidden.map((l) => l.num_neuron))];
+  const layerNote = layers.length === 1 ? "single layer"
+    : hidden.length === 1 ? "per hidden layer" : `per hidden layer · ${hidden.length} layers`;
+  const tiles = [
+    tile("Neuron count", sizes.map(fmt).join(" / "), layerNote),
+    tile("Memory units", fmt(hidden[0].num_memory), "per neuron"),
+  ];
+  if (h.trained_parameters) {
+    const p = h.trained_parameters >= 1e6 ? `${(h.trained_parameters / 1e6).toFixed(1)} M` : fmt(h.trained_parameters);
+    tiles.push(tile("Parameters", p, "learnable"));
+  }
+  if (h.test_bpc != null) tiles.push(tile("Evaluation", Number(h.test_bpc).toFixed(3), "test BPC"));
+  tiles.push(tile("Running on", "…", "initializing", "runs-on"));
+  $("stats").innerHTML = tiles.join("");
+  $("stats").hidden = false;
+  $("empty").hidden = true;
+  const prompt = DEFAULT_PROMPTS[String(h.dataset || "").toLowerCase()];
+  if (promptIsDefault && prompt) setBoxText(prompt);
+}
+
+function gpuName(info) {
+  const vendors = { apple: "Apple", nvidia: "NVIDIA", amd: "AMD", intel: "Intel", qualcomm: "Qualcomm",
+                    arm: "Arm", google: "Google", microsoft: "Microsoft", mesa: "Mesa" };
+  const words = (s) => String(s || "").split(/[-_\s]+/).filter(Boolean)
+    .map((w) => (/^(rdna|gcn|xe|uhd|hd)$/i.test(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)));
+  const vendor = vendors[String(info.vendor || "").toLowerCase()] || words(info.vendor).join(" ");
+  return [vendor, words(info.architecture).join(" ")].filter(Boolean).join(" ") || "locally";
+}
+
+function cpuHint() {
+  if (engine.adapterInfo) return "";
+  const linux = /linux/i.test(navigator.userAgent) && !/android/i.test(navigator.userAgent);
+  const fix = {
+    "no-adapter": "This browser has WebGPU, but not for this GPU yet: in Chrome, turn on " +
+                  "chrome://flags/#enable-unsafe-webgpu (in Edge: edge://flags/#enable-unsafe-webgpu), then restart it.",
+    "no-webgpu": linux ? "On Linux, open this page in Chrome; if WebGPU is still missing, turn on " +
+                         "chrome://flags/#enable-unsafe-webgpu and restart Chrome."
+                       : "A current Chrome, Edge, Firefox or Safari runs it on the GPU.",
+    "gpu-error": "The GPU could not run this network here.",
+  }[engine.fallbackReason] || "";
+  return `Running without WebGPU, so generation is slower. ${fix}`;
+}
+
+function showEngine() {
+  const gpu = Boolean(engine.adapterInfo);
+  const el = $("runs-on");
+  if (!el) return;
+  const note = gpu ? gpuName(engine.adapterInfo) : "no WebGPU here: slower";
+  el.querySelector(".stat-value").textContent = gpu ? "GPU" : "CPU";
+  const noteEl = el.querySelector(".stat-note");
+  noteEl.textContent = note;
+  noteEl.title = note;
+}
+
+async function discoverHuggingFaceModels() {
+  const select = $("hf-model");
+  try {
+    const res = await fetch(`https://huggingface.co/api/models/${HF_REPO}/tree/main`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const items = await res.json();
+    const bins = items
+      .filter((x) => x.type === "file" && typeof x.path === "string" && x.path.endsWith(".bin"))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    if (bins.length === 0) {
+      select.innerHTML = `<option value="">Hugging Face (no .bin files yet)</option>`;
+      select.disabled = true;
+      return;
+    }
+    select.innerHTML = `<option value="">Hugging Face Models…</option>` + bins.map((f) => {
+      const bytes = (f.lfs && f.lfs.size) || f.size || 0;
+      const label = bytes ? `${f.path} (${fmtMB(bytes)})` : f.path;
+      return `<option value="${esc(f.path)}" data-size="${bytes}">${esc(label)}</option>`;
+    }).join("");
+    select.disabled = busy;
+  } catch (err) {
+    console.warn("Could not list Hugging Face models:", err);
+    select.innerHTML = `<option value="">Hugging Face unavailable</option>`;
+    select.disabled = true;
+  }
+}
+
+async function fetchModelBuffer(path, expectedSize) {
+  const url = `https://huggingface.co/${HF_REPO}/resolve/main/${encodeURIComponent(path).replace(/%2F/g, "/")}`;
+  const cache = typeof caches !== "undefined" ? await caches.open(CACHE_NAME).catch(() => null) : null;
+  if (cache) {
+    const cached = await cache.match(url).catch(() => null);
+    if (cached) {
+      status(`<span class="spin"></span>Loading ${esc(path)} from browser cache…`);
+      return await cached.arrayBuffer();
+    }
+  }
+  status(`<span class="spin"></span>Downloading ${esc(path)}…`);
+  setProgress(0);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed (HTTP ${res.status})`);
+  const total = Number(res.headers.get("content-length")) || expectedSize || 0;
+  let buffer;
+  if (res.body && res.body.getReader) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.byteLength;
+      if (total > 0) {
+        const pct = Math.min(100, Math.round((100 * received) / total));
+        status(`<span class="spin"></span>Downloading ${esc(path)}… ${fmtMB(received)} / ${fmtMB(total)} (${pct}%)`);
+        setProgress(received / total);
+      } else {
+        status(`<span class="spin"></span>Downloading ${esc(path)}… ${fmtMB(received)}`);
+      }
+    }
+    const merged = new Uint8Array(received);
+    let offset = 0;
+    for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
+    buffer = merged.buffer;
+  } else {
+    buffer = await res.arrayBuffer();
+  }
+  setProgress(null);
+  if (cache) {
+    try {
+      await cache.put(url, new Response(buffer, { headers: { "content-type": "application/octet-stream" } }));
+    } catch (err) {
+      console.warn("Could not cache model:", err);
+    }
+  }
+  return buffer;
+}
+
+async function loadModel(getBuffer, name, fromHf = false) {
+  if (busy) return;
+  setBusy(true);
+  $("hint").textContent = "";
+  let replaced = false;
+  try {
+    const buffer = await getBuffer();
+    status(`<span class="spin"></span>Reading ${esc(name)}…`);
+    const next = ELM.parseModel(buffer);
+    if (engine) engine.destroy();
+    engine = null;
+    replaced = true;
+    model = next;
+    model.indexOfByte = new Int32Array(256).fill(-1);
+    model.header.byte_of_index.forEach((byte, token) => { model.indexOfByte[byte] = token; });
+    showNetwork();
+    $("activity").hidden = true;
+    status(`<span class="spin"></span>Starting the network on this computer…`);
+    engine = await ELM.createEngine(model, navigator.gpu);
+    showEngine();
+    $("hint").textContent = cpuHint();
+    status(`<span class="spin"></span>Checking that it reproduces the trained network…`);
+    const test = await ELM.selfTest(engine, model);
+    const detail = `Self-test over ${test.steps} characters: max |Δ logit| ${test.maxDiff.toExponential(1)}, ` +
+                   `${test.bpc.toFixed(3)} bpc`;
+    if (test.passed) {
+      status("✓ Network verified &amp; loaded successfully", "good", detail);
+      setupGrids(test.scales);
+      setPhase("Ready");
+    } else {
+      engine.destroy();
+      engine = null;
+      if (fromHf) $("hf-model").value = "";
+      status("✗ This browser does not reproduce the trained network; generation is disabled.", "bad", detail);
+    }
+  } catch (error) {
+    console.error(error);
+    if (replaced) {
+      if (engine) engine.destroy();
+      engine = null;
+    }
+    if (fromHf) $("hf-model").value = "";
+    status(`Could not load ${esc(name)}: ${esc(error.message)}`, "bad");
+  } finally {
+    setProgress(null);
+    setBusy(false);
+  }
+}
+
+// ---------- hidden layer neuron activity grids ----------
+let grids = [];
+
+function setupGrids(scales) {
+  $("viz").innerHTML = "";
+  grids = engine.shown.map((l, j) => {
+    const n = model.header.layers[l].num_neuron, [cols, rows] = ELM.gridShape(n);
+    const figure = document.createElement("figure"), canvas = document.createElement("canvas");
+    const stats = document.createElement("div");
+    figure.className = "grid";
+    stats.className = "grid-stats";
+    if (engine.shown.length > 1) {
+      const caption = document.createElement("figcaption");
+      caption.textContent = `Hidden Layer ${String(j + 1).padStart(2, "0")} · ${fmt(n)} neurons`;
+      figure.append(caption);
+    }
+    canvas.width = cols;
+    canvas.height = rows;
+    canvas.style.maxWidth = `${16 * cols}px`;
+    figure.append(canvas, stats);
+    $("viz").append(figure);
+    const ctx = canvas.getContext("2d"), image = ctx && ctx.createImageData(cols, rows);
+    if (image) for (let p = 0; p < cols * rows; p++) image.data.set([42, 120, 214, 0], 4 * p);
+    return { n, ctx, image, stats, scale: scales[j], glow: new Float32Array(n),
+             used: new Uint8Array(n), usedCount: 0, activeSum: 0, steps: 0 };
+  });
+  $("activity").hidden = false;
+}
+
+function countActivity(acts) {
+  grids.forEach((G, j) => {
+    const a = acts[j];
+    let active = 0;
+    for (let i = 0; i < G.n; i++) {
+      if (a[i] > 0) {
+        active++;
+        if (!G.used[i]) { G.used[i] = 1; G.usedCount++; }
+      }
+    }
+    G.activeSum += active / G.n;
+    G.steps++;
+  });
+}
+
+function showStats() {
+  for (const G of grids) {
+    G.stats.textContent = G.steps === 0 ? "" :
+      `Active ${((100 * G.activeSum) / G.steps).toFixed(1)}% per step · ` +
+      `Participated ${Math.round((100 * G.usedCount) / G.n)}% total`;
+  }
+}
+
+function drawGrids(acts) {
+  grids.forEach((G, j) => {
+    const a = acts[j];
+    for (let i = 0; i < G.n; i++) {
+      G.glow[i] = Math.max(Math.min(Math.sqrt(Math.max(a[i], 0) / G.scale), 1), 0.5 * G.glow[i]);
+    }
+    if (!G.ctx) return;
+    for (let i = 0; i < G.n; i++) G.image.data[4 * i + 3] = 255 * G.glow[i];
+    G.ctx.putImageData(G.image, 0, 0);
+  });
+}
+
+// ---------- text box & playback ----------
+const text = { prompt: [], decoder: null, cursorIn: null, readCount: 0, written: 0, total: 0 };
+
+function makeEditable() {
+  const box = $("box");
+  if (box.isContentEditable) return;
+  box.textContent = box.textContent;
+  try { box.contentEditable = "plaintext-only"; } catch (error) { box.contentEditable = "true"; }
+  if (box.contentEditable !== "plaintext-only") box.contentEditable = "true";
+  const selection = window.getSelection && window.getSelection();
+  if (selection && document.activeElement === box) {
+    const range = document.createRange();
+    range.selectNodeContents(box);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
+function setBoxText(value) {
+  $("box").contentEditable = "false";
+  $("box").textContent = value;
+  makeEditable();
+}
+
+function span(id) {
+  const s = document.createElement("span");
+  s.id = id;
+  s.append(document.createTextNode(""));
+  return s;
+}
+
+const node = (id) => $(id).firstChild;
+
+function startText(tokens, total) {
+  const byteOf = model.header.byte_of_index, decoder = new TextDecoder("utf-8");
+  Object.assign(text, {
+    prompt: tokens.map((t) => decoder.decode(new Uint8Array([byteOf[t]]), { stream: true })),
+    decoder: new TextDecoder("utf-8"), cursorIn: null, readCount: 0, written: 0, total,
+  });
+  const box = $("box");
+  box.contentEditable = "false";
+  box.replaceChildren(span("read"), span("written"), span("cursor"), span("unread"));
+  node("unread").data = text.prompt.join("");
+}
+
+function moveCursor(piece, into) {
+  if (text.cursorIn) node(text.cursorIn).appendData(node("cursor").data);
+  node("cursor").data = piece;
+  $("cursor").className = into === "read" ? "prompt" : "";
+  text.cursorIn = into;
+}
+
+function playStep(step) {
+  if (step.t < text.prompt.length) {
+    node("unread").deleteData(0, text.prompt[step.t].length);
+    moveCursor(text.prompt[step.t], "read");
+    text.readCount = step.t + 1;
+  }
+  if (step.t >= text.prompt.length - 1) {
+    const byte = model.header.byte_of_index[step.token];
+    moveCursor(text.decoder.decode(new Uint8Array([byte]), { stream: true }), "written");
+    text.written++;
+  }
+}
+
+function flashCursor() {
+  const c = $("cursor");
+  if (c && c.animate) {
+    c.animate([{ backgroundColor: "rgba(42, 120, 214, 0.75)" }, { backgroundColor: "rgba(42, 120, 214, 0)" }],
+              { duration: 300 });
+  }
+}
+
+const play = { queue: [], credit: 0, last: 0, start: 0, delivered: 0, active: false, frame: 0, speed: 0, state: "", note: "" };
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - play.last) / 1000);
+  play.last = now;
+  const rate = play.delivered / Math.max(0.05, (now - play.start) / 1000);
+  play.credit += rate * dt + (play.queue.length > 64 ? play.queue.length / 30 : 0);
+  const n = Math.min(play.queue.length, Math.floor(play.credit));
+  play.credit = play.queue.length > n ? play.credit - n : 0;
+  for (let s = 0; s < n; s++) {
+    const step = play.queue.shift();
+    playStep(step);
+    countActivity(step.acts);
+    if (s === n - 1) drawGrids(step.acts);
+  }
+  if (n > 0) {
+    flashCursor();
+    showStats();
+  }
+  if (play.active || play.queue.length) {
+    play.frame = requestAnimationFrame(frame);
+  } else {
+    moveCursor("", null);
+    play.frame = 0;
+    setPhase(stopRequested ? "Stopped" : "Done");
+    setBusy(false);
+  }
+}
+
+function setPhase(state) {
+  play.state = state;
+  const parts = [state];
+  if (play.speed) parts.push(`${fmt(play.speed)} characters/s`);
+  if (play.note) parts.push(play.note);
+  $("phase").textContent = parts.join(" · ");
+}
+
+function encode(value) {
+  const tokens = [];
+  let skipped = 0;
+  for (const byte of new TextEncoder().encode(value)) {
+    const token = model.indexOfByte[byte];
+    if (token >= 0) tokens.push(token);
+    else skipped++;
+  }
+  return { tokens, skipped };
+}
+
+async function generate() {
+  if (!engine || busy) return;
+  const { tokens, skipped } = encode($("box").textContent);
+  if (tokens.length === 0) {
+    $("phase").textContent = "Type a few supported characters first";
+    return;
+  }
+  const total = Math.min(100000, Math.max(1, Math.floor(Number($("length").value) || 0)));
+  stopRequested = false;
+  promptIsDefault = false;
+  setBusy(true, true);
+  startText(tokens, total);
+  for (const G of grids) {
+    G.glow.fill(0);
+    G.used.fill(0);
+    Object.assign(G, { usedCount: 0, activeSum: 0, steps: 0 });
+  }
+  showStats();
+  const now = performance.now();
+  const note = skipped ? `skipped ${skipped} unsupported byte${skipped === 1 ? "" : "s"}` : "";
+  Object.assign(play, { queue: [], credit: 0, delivered: 0, active: true, start: now, last: now, speed: 0, note });
+  setPhase("Running");
+  if (!play.frame) play.frame = requestAnimationFrame(frame);
+  try {
+    await engine.run({
+      given: Uint32Array.from(tokens),
+      steps: tokens.length - 1 + total,
+      temperature: Math.min(1, Math.max(0, Number($("temperature").value) || 0)),
+      shouldStop: () => stopRequested,
+      onBlock: (t0, block, acts) => {
+        block.forEach((token, s) => {
+          const stepActs = acts.map((a, j) => a.subarray(s * grids[j].n, (s + 1) * grids[j].n));
+          play.queue.push({ t: t0 + s, token, acts: stepActs });
+        });
+        play.delivered += block.length;
+        play.speed = play.delivered / Math.max(0.001, (performance.now() - play.start) / 1000);
+        setPhase(play.state);
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    status(`Generation failed: ${esc(error.message)}`, "bad");
+  }
+  play.active = false;
+}
+
+// ---------- controls ----------
+function setBusy(value, generating = false) {
+  busy = value;
+  $("generate").disabled = value || !engine;
+  $("clear").disabled = value;
+  $("choose").disabled = value;
+  $("hf-model").disabled = value || $("hf-model").options.length <= 1;
+  $("stop").disabled = !generating;
+}
+
+$("generate").addEventListener("click", generate);
+$("stop").addEventListener("click", () => { stopRequested = true; $("stop").disabled = true; });
+$("clear").addEventListener("click", () => { promptIsDefault = false; setBoxText(""); $("box").focus(); });
+$("box").addEventListener("focus", () => { if (!busy) makeEditable(); });
+$("box").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); generate(); }
+});
+$("box").addEventListener("input", () => { promptIsDefault = false; });
+
+function bindSlider(name, { min, max, digits }) {
+  const range = $(`${name}-range`), box = $(name);
+  range.addEventListener("input", () => { box.value = Number(range.value).toFixed(digits); });
+  box.addEventListener("change", () => {
+    let v = Number(box.value);
+    if (!Number.isFinite(v) || box.value.trim() === "") v = Number(range.value);
+    v = Math.min(max, Math.max(min, v));
+    box.value = v.toFixed(digits);
+    range.value = String(Math.min(v, Number(range.max)));
+  });
+}
+bindSlider("length", { min: 1, max: 100000, digits: 0 });
+bindSlider("temperature", { min: 0, max: 1, digits: 2 });
+
+$("hf-model").addEventListener("change", (e) => {
+  const opt = e.target.selectedOptions[0];
+  if (opt && opt.value) {
+    const path = opt.value, size = Number(opt.dataset.size) || 0;
+    loadModel(() => fetchModelBuffer(path, size), path, true);
+  }
+});
+$("choose").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (file) {
+    $("hf-model").value = "";
+    loadModel(() => file.arrayBuffer(), file.name);
+  }
+});
+
+let dragDepth = 0;
+document.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; $("overlay").hidden = busy; });
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("overlay").hidden = true; } });
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  $("overlay").hidden = true;
+  const file = e.dataTransfer && e.dataTransfer.files[0];
+  if (file && !busy) {
+    $("hf-model").value = "";
+    loadModel(() => file.arrayBuffer(), file.name);
+  }
+});
+
+setBoxText(DEFAULT_PROMPTS.enwik8);
+discoverHuggingFaceModels();
+</script>
+</body>
+</html>

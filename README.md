@@ -65,6 +65,12 @@ analysis/
 - additional notebook to retrieve experiments from wandb (some provided) and simple plotting
 - // potentially power-law fitting related analysis code will be added later
 
+***The browser demo is in:***
+```
+demo/
+```
+- interactive inference page (`index.html`) and checkpoint exporter (`export_browser_demo.py`)
+
 ## Environment Setup
 
 For running experiments on an Nvidia GPU cluster please use the CUDA version:
@@ -116,6 +122,24 @@ Per-step times on one NVIDIA A100-40GB (4096 neurons, 32 memory units, batch siz
 | Plain JAX, random wiring (TF32, checkpointed) | 12,103 ms | 1.0x |
 | + Branch pools (`share_size=64`) | 1,105 ms | 11.0x |
 | + Fused Triton kernels (`fast_backward=10`, `BF16_BF16_F32`) | 208 ms | 58.2x |
+
+## Browser Demo
+
+Try trained ELM networks live in your browser — character-by-character text generation with live hidden-layer neuron activity, running locally on your CPU or GPU (if available):
+
+- live demo: [aaronspieler.github.io/elmnetwork](https://aaronspieler.github.io/elmnetwork/)
+- pretrained models: [huggingface.co/AaronSpieler/elmnetwork](https://huggingface.co/AaronSpieler/elmnetwork) (selectable directly in the demo, or drop a local `.bin` file)
+- note: the browser demo code was written fully LLM-assisted
+
+***Exporting a trained run:***
+
+- export a character-level language-modeling run directory to a `.bin` file for the demo:
+
+```
+python demo/export_browser_demo.py <run_dir> [--out-dir DIR]
+```
+
+- supports standard ELM network configs (except `branch_tau` and `mlp_num_hidden_layer > 1`)
 
 ## Dataset Setup
 
