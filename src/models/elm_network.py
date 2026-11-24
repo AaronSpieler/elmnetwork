@@ -103,6 +103,8 @@ class ELMNetwork(eqx.Module, DynamicModel):
             Note that the model first applies some default last-layer overrides
             before the herein specified values are used for override.
             Override chain: default <- layer config <- default l.l. override <- l.l. override
+        - `fused`: Whether to run the sequence with fused Triton GPU kernels
+            (see `fused_layer.FUSED_SETTINGS`).
         """
         super().__init__()
         self.num_input = num_input
@@ -255,7 +257,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
         x_t: Float[Array, "channel"],
         monitor: Optional[NetworkMonitor],
         inference: bool,
-        shared_lists: Optional[list] = None,
+        branch_pools: Optional[list] = None,
     ) -> tuple[NetworkCarry, NetworkRecord]:
         layer_ensemble_carries, key, const_key = carry
         next_layer_ensemble_carries = []
@@ -272,7 +274,7 @@ class ELMNetwork(eqx.Module, DynamicModel):
                 x_t,
                 monitor,
                 inference,
-                shared_lists[layer_idx] if shared_lists is not None else None,
+                branch_pools[layer_idx] if branch_pools is not None else None,
             )
             x_t = layer_ensemble_recording[0]["activity"]
             next_layer_ensemble_carries.append(layer_ensemble_carry)
@@ -304,9 +306,9 @@ class ELMNetwork(eqx.Module, DynamicModel):
                 self, carry, x, monitor, inference
             )
         else:
-            shared_lists = [layer.shared_lists for layer in self.layers]
+            branch_pools = [layer.branch_pools for layer in self.layers]
             scan_fun = lambda carry, x_t: self.dynamics(
-                carry, x_t, monitor, inference, shared_lists
+                carry, x_t, monitor, inference, branch_pools
             )
             if grad_checkpointing:
                 scan_fun = jax.checkpoint(scan_fun)

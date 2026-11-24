@@ -90,7 +90,7 @@ For larger ELM networks on Nvidia GPUs, two model options provide major speedups
 
 ***Branch pools (`input_wiring: "random_pooled"`):***
 
-- groups of `share_size` neurons share branch input connections (default `16`; `32`–`64` is faster on large layers)
+- pools of `share_size` branches (partitioned independently per branch slot across neurons) share input sources while keeping independent synapse weights (default `16`; `32`–`64` is faster on large layers)
 - pair with `training.grad_checkpointing=True` (see `configs/model/elmnet_enwik8_pooled.yaml`)
 
 ***Fused Triton kernels (`fused: True`):***
@@ -184,6 +184,6 @@ If you wish to cite us you can do so using
   booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
   volume={39},
   year={2026},
-  url={https://openreview.net/forum?id=vE1e1mLJ0U}
+  url={https://openreview.net/forum?id=zpewdRsVpA}
 }
 ```

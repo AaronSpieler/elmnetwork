@@ -100,32 +100,35 @@ def random_connect_pooled(
     return_order: bool = False,
     **kwargs,
 ):
-    """random_connect, but groups of share_size neurons share each branch's input
-    sources (branch pools; each neuron keeps its own synapse weights).
+    """Like `random_connect`, but branches are grouped into pools of `share_size`
+    branches that share input sources (each branch keeps its own synapse weights).
 
-    Per branch, the neurons are shuffled and each run of share_size neurons takes
-    the branch's sources of the run's first neuron: every shared list has exactly
-    share_size sharers (the last run fewer if num_neuron isn't a multiple), and
-    the lists keep random_connect's statistics. share_size=1: no sharing.
-    return_order: also return the order, (branch, position) -> neuron, from which
-    the shared-list and fused paths rebuild the groups.
+    For each branch slot independently, the `num_neuron` branches across the layer
+    (one per neuron) are shuffled into pools of `share_size` branches; every branch
+    in a pool takes the first branch's sources (`share_size=1`: no sharing).
+    `return_order`: also return `(branch, pool_pos) -> owner_neuron`.
     """
     assert share_size >= 1
     key_conn, key_order = jrandom.split(key)
     num_neuron_inputs = num_branch_neuron * num_synapse_per_branch_neuron
-    conn = random_connect(key_conn, num_input, num_neuron, num_neuron_inputs, **kwargs)
-    conn = conn.reshape(num_neuron, num_branch_neuron, num_synapse_per_branch_neuron)
-    # per branch: a random order of the neurons (position -> neuron), each neuron's
-    # position in it, and the first neuron of its run of share_size
-    order = jnp.argsort(
+    connectivity = random_connect(
+        key_conn, num_input, num_neuron, num_neuron_inputs, **kwargs
+    )
+    connectivity = connectivity.reshape(
+        num_neuron, num_branch_neuron, num_synapse_per_branch_neuron
+    )
+    # shuffle branch owners into pools and share each pool's first branch sources
+    owner_order = jnp.argsort(
         jrandom.uniform(key_order, (num_branch_neuron, num_neuron)), axis=1
     )
-    position = jnp.argsort(order, axis=1)
-    first = jnp.take_along_axis(order, position // share_size * share_size, axis=1)
-    conn = conn[first.T, jnp.arange(num_branch_neuron)].reshape(
+    owner_pos = jnp.argsort(owner_order, axis=1)
+    pool_leader = jnp.take_along_axis(
+        owner_order, (owner_pos // share_size) * share_size, axis=1
+    )
+    connectivity = connectivity[pool_leader.T, jnp.arange(num_branch_neuron)].reshape(
         num_neuron, num_neuron_inputs
     )
-    return (conn, order.astype(jnp.int32)) if return_order else conn
+    return (connectivity, owner_order.astype(jnp.int32)) if return_order else connectivity
 
 
 def _recursive_dict_merge(base_dict: dict, update_dict: dict) -> dict:

@@ -5,9 +5,9 @@ One warm-up step, then the median of --repeats steps. Run from the repository ro
     python src/profiling/bench_step.py --mode fused --num-hidden 4096 --num-memory 32 \
         --batch 64 --steps 100
 
-Compare plain JAX, branch-pool shared lists, and fused kernels via --mode:
+Compare plain JAX, branch pools, and fused kernels via --mode:
   - plain  : random wiring, plain JAX (with per-step gradient checkpointing)
-  - pooled : random_pooled wiring, plain-JAX shared lists (with gradient checkpointing)
+  - pooled : random_pooled wiring, plain-JAX branch pools (with gradient checkpointing)
   - fused  : fused=True Triton GPU kernels (pooled or random wiring)
 """
 
@@ -46,7 +46,7 @@ def parser() -> argparse.ArgumentParser:
         "--share-size",
         type=int,
         default=64,
-        help="neurons per shared input list (pooled wiring)",
+        help="branches per branch pool (pooled wiring)",
     )
     p.add_argument(
         "--wiring",
@@ -89,6 +89,7 @@ def build_step(args):
 
     from src.datasets.language.language_train_utils import language_loss_and_grads
     from src.models.elm_network import ELMNetwork
+    from src.models.fused_layer import next_pow2
     from src.training.regularizer import ELMNetworkRegularizer
 
     dm = args.num_memory
@@ -125,7 +126,7 @@ def build_step(args):
         hidden_chunk = (
             args.hidden_chunk
             if args.hidden_chunk is not None
-            else min(64, max(8, 1 << (2 * dm - 1).bit_length()))
+            else min(64, max(8, next_pow2(2 * dm)))
         )
         layer_config["fused_kernels_args"] = {
             "interpret": False,
@@ -153,19 +154,19 @@ def build_step(args):
     f = jax.jit(
         lambda d: language_loss_and_grads(
             d,
-            stat,
-            x,
-            y,
-            jrandom.PRNGKey(3),
-            args.batch,
-            VOCAB,
-            0,
-            1e-4,
-            None,
-            False,
-            True,
-            reg,
-            grad_checkpointing,
+            model_stat=stat,
+            x=x,
+            y=y,
+            key=jrandom.PRNGKey(3),
+            batch_size=args.batch,
+            vocab_size=VOCAB,
+            burn_in_time=0,
+            label_smoothing=1e-4,
+            init_carry=None,
+            return_logits=False,
+            return_carry=True,
+            regularizer=reg,
+            grad_checkpointing=grad_checkpointing,
         )
     )
     return f, diff

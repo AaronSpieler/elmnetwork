@@ -1,4 +1,5 @@
 import copy
+import math
 import warnings
 from typing import Any, Optional
 
@@ -113,11 +114,11 @@ class ELMLayer(eqx.Module, DynamicModel):
             and output size is auto-configured, and no custom synapse routing is allowed.
         - `input_wiring`: Which strategy to use for connecting inputs to neuron synapses.
             The default is `random` which uniformly at random samples possible connections.
-            `random_pooled` samples alike, but groups of `share_size` neurons share each
-            branch's input sources (branch pools; see `random_connect_pooled`).
+            `random_pooled` samples alike, but partitions branches per branch slot
+            into pools of `share_size` branches sharing input sources (see `random_connect_pooled`).
         - `input_wiring_args`: The arguments to the connectivity generating function.
-            For the `random` wiring connectivity one can specify the probability of
-            sampling a recurrent connection (instead of a feed-forward connection).
+            For `random`, `recurrent_connect` sets the recurrent connection probability.
+            For `random_pooled`, `share_size` sets the number of branches per pool (default 16).
         - `input_dropout`: The dropout probability for the feed-forward input during training.
         - `recurrent_dropout`: The dropout probability for the recurrent input during training.
         - `fused_kernels_args`: Optional settings for the fused Triton kernels when the
@@ -222,7 +223,7 @@ class ELMLayer(eqx.Module, DynamicModel):
         )
 
     @property
-    def use_shared_lists(self) -> bool:
+    def use_branch_pools(self) -> bool:
         return (
             self.input_wiring == "random_pooled"
             and self.input_pool_order is not None
@@ -314,48 +315,71 @@ class ELMLayer(eqx.Module, DynamicModel):
 
     @property
     @jaxtyped(typechecker=typechecker)
-    def shared_lists(self) -> Optional[dict[str, Shaped[Array, "..."]]]:
-        """Branch pools as shared lists, built once per sequence before scan."""
-        if not self.use_shared_lists:
+    def branch_pools(self) -> Optional[dict[str, Shaped[Array, "..."]]]:
+        if not self.use_branch_pools:
             return None
-        n, nb = self.num_neuron, self.ensemble.num_branch
-        p = self.ensemble.num_synapse_per_branch
-        g = self.input_wiring_args.get("share_size", 16)
-        runs = -(-n // g)  # the last list has fewer members unless n divides
-        order = jnp.pad(
-            self.input_pool_order, ((0, 0), (0, runs * g - n)), constant_values=-1
+
+        pool_size = self.input_wiring_args.get("share_size", 16)
+        num_pools = math.ceil(self.num_neuron / pool_size)
+
+        # group branch owners into fixed-size pools (pad last pool with -1)
+        pad = num_pools * pool_size - self.num_neuron
+        padded_order = jnp.pad(
+            self.input_pool_order, ((0, 0), (0, pad)), constant_values=-1
         )
-        members = order.reshape(nb, runs, g)  # (branch, list, member), -1: no member
-        real = members >= 0
-        members = jnp.where(real, members, 0)
-        branch = jnp.arange(nb)
-        list_src = self.input_connectome.reshape(n, nb, p)[
-            members[..., 0], branch[:, None]
-        ]
+        pool_owners = padded_order.reshape(
+            self.ensemble.num_branch, num_pools, pool_size
+        )
+        is_valid = pool_owners >= 0
+        safe_owners = jnp.where(is_valid, pool_owners, 0)
+        branch_idx = jnp.arange(self.ensemble.num_branch)
+
+        # shared input sources per pool (read from slot 0)
+        connectome = self.input_connectome.reshape(
+            self.num_neuron,
+            self.ensemble.num_branch,
+            self.ensemble.num_synapse_per_branch,
+        )
+        pool_sources = connectome[safe_owners[:, :, 0], branch_idx[:, None]]
+
+        # per-branch synapse weights in pool layout (zero padded slots)
         w_s = eqx.filter_vmap(lambda neuron: neuron.w_s)(self.ensemble)
-        list_w = w_s.reshape(n, nb, p)[members, branch[:, None, None]]
-        list_w = jnp.where(real[..., None], list_w, 0.0) * self.ensemble.input_scale
+        w_s = w_s.reshape(
+            self.num_neuron,
+            self.ensemble.num_branch,
+            self.ensemble.num_synapse_per_branch,
+        )
+        pool_weights = w_s[safe_owners, branch_idx[:, None, None]]
+        pool_weights = (
+            jnp.where(is_valid[..., None], pool_weights, 0.0)
+            * self.ensemble.input_scale
+        )
+
+        # inverse permutation back to neuron order
+        owner_positions = jnp.argsort(self.input_pool_order, axis=1)
         return {
-            "list_src": list_src,
-            "list_w": list_w,
-            "list_pos": jnp.argsort(self.input_pool_order, axis=1),
+            "sources": pool_sources,  # (branch, pool, synapse)
+            "weights": pool_weights,  # (branch, pool, member, synapse)
+            "owner_positions": owner_positions,  # (branch, neuron)
         }
 
     @jaxtyped(typechecker=typechecker)
-    def sum_shared_lists(
+    def sum_branch_pools(
         self,
         layer_inputs: Float[Array, "channel"],
         prev_activity: Float[Array, "{self.num_neuron}"],
-        shared_lists: Optional[dict[str, Shaped[Array, "..."]]] = None,
+        branch_pools: Optional[dict[str, Shaped[Array, "..."]]] = None,
     ) -> Float[Array, "{self.num_neuron} branch"]:
-        tables = shared_lists if shared_lists is not None else self.shared_lists
+        pools = branch_pools if branch_pools is not None else self.branch_pools
         all_inputs = jnp.concatenate((layer_inputs, prev_activity), axis=-1)
-        xs = all_inputs[tables["list_src"]]
-        sums = jnp.einsum("krgp,krp->krg", tables["list_w"], xs)
-        sums = jnp.take_along_axis(
-            sums.reshape(sums.shape[0], -1), tables["list_pos"], axis=1
-        )
-        return sums.T
+        # gather once per pool and dot with per-branch weights
+        pool_inputs = all_inputs[pools["sources"]]  # (branch, pool, synapse)
+        pool_sums = jnp.einsum("bpms,bps->bpm", pools["weights"], pool_inputs)
+
+        # reorder from pool layout back to owning neurons
+        flat_sums = pool_sums.reshape(pool_sums.shape[0], -1)
+        branch_sums = jnp.take_along_axis(flat_sums, pools["owner_positions"], axis=1)
+        return branch_sums.T  # (neuron, branch)
 
     @eqx.filter_jit
     @jaxtyped(typechecker=typechecker)
@@ -365,7 +389,7 @@ class ELMLayer(eqx.Module, DynamicModel):
         x_t: Float[Array, "channel"],
         monitor: Optional[LayerMonitor],
         inference: bool,
-        shared_lists: Optional[dict[str, Shaped[Array, "..."]]] = None,
+        branch_pools: Optional[dict[str, Shaped[Array, "..."]]] = None,
     ) -> tuple[LayerEnsembleCarry, LayerEnsembleRecord]:
         layer_carry, ensemble_carry = carry
         layer_monitor, ensemble_monitor = monitor if monitor else ([], [])
@@ -382,8 +406,8 @@ class ELMLayer(eqx.Module, DynamicModel):
         )
 
         # simulate the ensemble for one time step
-        if self.use_shared_lists:
-            ensemble_inputs = self.sum_shared_lists(x_t, a_t_dropped, shared_lists)
+        if self.use_branch_pools:
+            ensemble_inputs = self.sum_branch_pools(x_t, a_t_dropped, branch_pools)
             precomputed_branches = True
         else:
             ensemble_inputs = self.gather_ensemble_inputs(x_t, a_t_dropped)
@@ -420,13 +444,13 @@ class ELMLayer(eqx.Module, DynamicModel):
     ) -> tuple[LayerActHistory, LayerEnsembleRecordHistory, LayerEnsembleCarry]:
         # compute the recurrent dynamics for a single sample
         x = x.astype(self.ensemble.dtype)
-        shared_lists = self.shared_lists
+        branch_pools = self.branch_pools
         scan_fun = lambda carry_state, input_spikes: self.dynamics(
             carry_state,
             input_spikes,
             monitor,
             inference,
-            shared_lists,
+            branch_pools,
         )
         carry = init_carry if init_carry is not None else self.get_init_carry(key=key)
         carry, records = jlx.scan(scan_fun, carry, x)
